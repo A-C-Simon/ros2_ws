@@ -18,6 +18,7 @@
 
 # ---- Editor / tool state (machine-local, not for the repo) ----
 .seekcode/
+.upstream_compare/
 .claude/
 .vscode/
 imgui.ini
