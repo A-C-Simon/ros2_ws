@@ -1,0 +1,32 @@
+# ---- ROS 2 build artifacts ----
+**/build/
+**/install/
+**/log/
+**/devel/
+**/build_isolated/
+**/devel_isolated/
+
+# ---- Python ----
+**/__pycache__/
+**/*.pyc
+
+# ---- Rosbags & sensor data ----
+*.bag
+*.bag.active
+*.db3
+*.mcap
+
+# ---- Editor / tool state (machine-local, not for the repo) ----
+.seekcode/
+.claude/
+.vscode/
+imgui.ini
+*.swp
+*.swo
+
+# ---- Large upstream README assets (re-add via git-lfs if needed) ----
+FAST_LIO_ROS2/doc/*.gif
+
+# ---- OS junk ----
+.DS_Store
+Thumbs.db

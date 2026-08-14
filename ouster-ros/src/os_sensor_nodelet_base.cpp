@@ -1,0 +1,64 @@
+/**
+ * Copyright (c) 2018-2023, Ouster, Inc.
+ * All rights reserved.
+ *
+ * @file os_sensor_nodelet_base.cpp
+ * @brief implementation of OusterSensorNodeletBase interface
+ */
+
+#include "ouster_ros/os_sensor_nodelet_base.h"
+
+#include <ouster/impl/build.h>
+#include <std_msgs/String.h>
+
+#include "ouster_ros/GetMetadata.h"
+
+using ouster::sdk::core::UDPProfileLidar;
+using ouster::sdk::core::SensorInfo;
+using ouster::sdk::core::LidarMode;
+
+namespace ouster_ros {
+
+void OusterSensorNodeletBase::create_get_metadata_service() {
+    auto& nh = getNodeHandle();
+    get_metadata_srv =
+        nh.advertiseService<GetMetadata::Request, GetMetadata::Response>(
+            "get_metadata",
+            [this](GetMetadata::Request&, GetMetadata::Response& res) {
+                res.metadata = cached_metadata;
+                return cached_metadata.size() > 0;
+            });
+
+    NODELET_INFO("get_metadata service created");
+}
+
+void OusterSensorNodeletBase::create_metadata_pub() {
+    auto& nh = getNodeHandle();
+    metadata_pub = nh.advertise<std_msgs::String>("metadata", 1, true);
+}
+
+void OusterSensorNodeletBase::publish_metadata() {
+    std_msgs::String metadata_msg;
+    metadata_msg.data = cached_metadata;
+    metadata_pub.publish(metadata_msg);
+}
+
+void OusterSensorNodeletBase::display_lidar_info(
+    const SensorInfo& info) {
+    auto fw_ver = ouster::sdk::core::version_from_string(info.image_rev);
+    auto lidar_profile = info.format.udp_profile_lidar;
+    auto imu_profile = info.format.udp_profile_imu;
+    auto lidar_mode = info.config.lidar_mode.value_or(LidarMode(0, 0));
+    auto columns_per_packet = info.format.columns_per_packet;
+    NODELET_INFO_STREAM(
+        "ouster client version: "
+        << ouster::sdk::SDK_VERSION_FULL << "\n"
+        << "product: " << info.prod_line << ", sn: " << info.sn << ", "
+        << "firmware ver: " << fw_ver.simple_version_string() << "\n"
+        << "lidar mode: " << ouster::sdk::core::to_string(lidar_mode) << ", "
+        << "lidar udp profile: " << ouster::sdk::core::to_string(lidar_profile) << ", "
+        << "imu udp profile: " << ouster::sdk::core::to_string(imu_profile) << "\n"
+        << "columns per packet: " << columns_per_packet);
+}
+
+}  // namespace ouster_ros

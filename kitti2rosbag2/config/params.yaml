@@ -1,0 +1,17 @@
+kitti_rec:
+  ros__parameters:
+    sequence: 1
+    data_dir: '/home/ac/datasets/KITTI/dataset'
+    odom_dir: '/home/ac/datasets/KITTI/dataset'
+    bag_dir : '/home/ac/Documents/kitti_dataset/my_bag_imu1'
+    odom : True
+    velodyne : True
+    # leave empty to look for sequences/XX/velodyne under data_dir
+    velodyne_dir : ''
+    # publishes /imu/data + /gps/fix from the raw dataset's OXTS files, since
+    # the odometry benchmark itself ships no IMU/GPS. Only sequences 00-10
+    # have a published raw-drive mapping. raw_dir must point at the folder
+    # containing the raw dataset's date directories (e.g. 2011_10_03/...),
+    # downloaded separately from https://www.cvlibs.net/datasets/kitti/raw_data.php
+    imu : True
+    raw_dir : '/home/ac/datasets/KITTI/raw'
