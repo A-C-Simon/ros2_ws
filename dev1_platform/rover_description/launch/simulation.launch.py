@@ -358,6 +358,20 @@ def _launch_setup(context, *args, **kwargs):
     first = int(fleet['first_index'])
     rover_ns_list = [f'{prefix}{first + i}' for i in range(num_rovers)]
 
+    # The R-reset key in the teleop calls /world/<name>/set_pose, so the world
+    # name must match the running .sdf's <world name="..."> tag. Extract it here
+    # and hand it to rover_teleop --world; never hardcode it in the script.
+    world_arg = LaunchConfiguration('world').perform(context)
+    world_name = 'test_station'
+    if world_arg and os.path.isfile(world_arg):
+        try:
+            with open(world_arg, 'r') as f:
+                m = re.search(r'<world\s+name="([^"]+)"', f.read())
+            if m:
+                world_name = m.group(1)
+        except OSError:
+            pass
+
     actions = []
     poses = resolve_spawn_poses(fleet, rover_ns_list)
     modes = []
@@ -392,7 +406,8 @@ def _launch_setup(context, *args, **kwargs):
         executable='rover_teleop.py',
         name='fleet_teleop',
         arguments=['--rovers', *rover_ns_list,
-                   '--spawn-poses', *[f'{p[0]},{p[1]}' for p in poses]],
+                   '--spawn-poses', *[f'{p[0]},{p[1]}' for p in poses],
+                   '--world', world_name],
         parameters=[swarm_yaml, {'use_sim_time': True}],
         prefix='gnome-terminal --wait --title="Fleet Teleop" --',
         output='screen',

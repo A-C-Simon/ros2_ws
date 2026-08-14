@@ -78,9 +78,9 @@ def get_key(poll=PUBLISH_PERIOD):
     return key
 
 
-def reset_rover(name, x=0.0, y=0.0):
+def reset_rover(name, x=0.0, y=0.0, world='test_station'):
     subprocess.run([
-        'ign', 'service', '-s', '/world/rover_world/set_pose',
+        'ign', 'service', '-s', f'/world/{world}/set_pose',
         '--reqtype', 'ignition.msgs.Pose',
         '--reptype', 'ignition.msgs.Boolean',
         '--timeout', '500',
@@ -315,6 +315,10 @@ def main():
                          'Overrides --spawn-spacing.')
     ap.add_argument('--spawn-spacing', type=float, default=0.8,
                     help='Fallback Y spacing between rovers when --spawn-poses is absent. Default 0.8.')
+    ap.add_argument('--world', default='test_station',
+                    help='Ignition world name for the reset service. MUST match the '
+                         '<world name="..."> of the running .sdf (e.g. test_station, '
+                         'rover_world), or the R reset key silently fails.')
     # Legacy single-rover flags (kept so old launch invocations still work).
     ap.add_argument('-n', '--namespace', default='')
     ap.add_argument('-x', '--spawn-x', type=float, default=0.0)
@@ -438,7 +442,15 @@ def main():
                 # LOWERCASE only. Uppercase 'R' avoids collision with any stray
                 # follow-byte from a garbled escape sequence.
                 name = active.namespace if active.namespace else 'rover'
-                reset_rover(name, active.spawn_x, active.spawn_y)
+                reset_rover(name, active.spawn_x, active.spawn_y, args.world)
+                # Clear the motion state so the rover doesn't keep driving right
+                # after the teleport.
+                active.target_lin, active.target_ang = 0.0, 0.0
+                active.cur_lin, active.cur_ang = 0.0, 0.0
+                active.lin_active = False
+                active.ang_active = False
+                active.last_lin_arrow = 0.0
+                active.last_ang_arrow = 0.0
                 sys.stdout.write(f'\r  {name} reset to ({active.spawn_x:.1f}, {active.spawn_y:.1f})\r\n'); sys.stdout.flush()
             elif key == '\x03':  # Ctrl+C
                 break
