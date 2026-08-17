@@ -90,6 +90,18 @@ estop_manager:
   ros__parameters:
     stop_topic: /emergency_stop
 
+# ─── Cmd-vel arbiter ─────────────────────────────────────────────────────
+# Single-writer twist mux in front of every rover's DiffDrive. Reads
+# /<ns>/cmd_vel_teleop (teleop) and /<ns>/cmd_vel (autonomy), and forwards the
+# winner — estop > teleop-active > autonomy > zero — to the bridged
+# /<ns>/cmd_vel_arb. teleop_timeout is the WALL-clock window during which a
+# fresh teleop message keeps priority after teleop goes quiet (the coast-down
+# handoff), so the handoff latency is constant regardless of sim RTF.
+cmd_vel_arbiter:
+  ros__parameters:
+    teleop_timeout: 0.2
+    publish_rate: 30.0
+
 # ─── Teleop motion tuning ────────────────────────────────────────────────
 # These are loaded by fleet_teleop at runtime. They MUST stay in sync with the
 # URDF DiffDrive plugin limits (max_linear_velocity, max_angular_velocity,
