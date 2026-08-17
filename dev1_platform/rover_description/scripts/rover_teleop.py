@@ -25,6 +25,12 @@ this terminal at 2 Hz: linear/angular velocity (v, ω) and acceleration
 (a, α). It keeps updating through the release coast-down — the rover never
 stops instantly — and prints one final "stopped" line when it comes to rest.
 
+Twist output: teleop publishes to /<ns>/cmd_vel_teleop (NOT /<ns>/cmd_vel),
+and once a rover reaches rest it stops publishing entirely. A cmd_vel_arbiter
+node muxes this with the autonomy input /<ns>/cmd_vel, keeps teleop priority
+while its messages are fresh, and forwards the winner to the bridged
+/<ns>/cmd_vel_arb. So autonomy never gets stomped by idle teleop zero-spam.
+
 Motion limits are loaded from ROS parameters (see config/swarm.yaml). The
 critical rule still holds: the teleop acceleration constants MUST match the
 URDF DiffDrive plugin's max_linear_acceleration / max_angular_acceleration.
@@ -95,8 +101,17 @@ class RoverState:
         self.namespace = namespace
         self.spawn_x = spawn_x
         self.spawn_y = spawn_y
-        topic = f'/{namespace}/cmd_vel' if namespace else '/cmd_vel'
+        # Teleop writes its OWN twist topic. A separate cmd_vel_arbiter node
+        # (scripts/cmd_vel_arbiter.py) muxes /<ns>/cmd_vel_teleop with the
+        # autonomy input /<ns>/cmd_vel and forwards the winner to the bridged
+        # /<ns>/cmd_vel_arb. Teleop must never publish straight to cmd_vel:
+        # its 20 Hz zero-twist while idle used to stomp autonomy commands and
+        # (via the DiffDrive's acceleration ramp) cap real speed at ~0.02 m/s.
+        topic = f'/{namespace}/cmd_vel_teleop' if namespace else '/cmd_vel_teleop'
         self.pub = node.create_publisher(Twist, topic, 10)
+        # Idle-stop flag: once the rover is at rest, tick() publishes one final
+        # zero and then goes silent so the teleop releases control of the mux.
+        self._idle = False
         self.target_lin = 0.0
         self.target_ang = 0.0
         self.cur_lin = 0.0
@@ -123,6 +138,14 @@ class RoverState:
         """Ramp target up/down, ramp current toward target, publish."""
         if now is None:
             now = time.time()
+        # Idle-stop: any pending motion clears the flag; otherwise a fully rest
+        # rover stays silent. The arbiter hands priority back to autonomy once
+        # teleop stops publishing (plus a short handoff window).
+        if (self.lin_active or self.ang_active or self.target_lin or self.target_ang
+                or self.cur_lin or self.cur_ang):
+            self._idle = False
+        if self._idle:
+            return
         if self._coast_axis(self.lin_active, self.last_lin_arrow, now):
             self.lin_active = False
         if self._coast_axis(self.ang_active, self.last_ang_arrow, now):
@@ -175,6 +198,12 @@ class RoverState:
         t.linear.x = self.cur_lin
         t.angular.z = self.cur_ang
         self.pub.publish(t)
+
+        # Now at rest? Publish this final zero and go silent until the next key.
+        if (not self.lin_active and not self.ang_active
+                and self.cur_lin == 0.0 and self.cur_ang == 0.0
+                and self.target_lin == 0.0 and self.target_ang == 0.0):
+            self._idle = True
 
 
 def declare_teleop_params(node):
