@@ -576,7 +576,10 @@
       <max_linear_acceleration>1.0</max_linear_acceleration>
       <max_angular_velocity>3.0</max_angular_velocity>
       <max_angular_acceleration>1.0</max_angular_acceleration>
-      <topic>__NS__/cmd_vel</topic>
+      <!-- Subscribe topic is __NS__/cmd_vel_arb — the cmd_vel_arbiter's OUTPUT,
+           which is the only ROS twist the bridge forwards into gz. The arbiter
+           muxes /__NS__/cmd_vel (autonomy) and /__NS__/cmd_vel_teleop (teleop). -->
+      <topic>__NS__/cmd_vel_arb</topic>
       <odom_topic>__NS__/odom</odom_topic>
       <tf_topic>/tf</tf_topic>
       <frame_id>__NS__/odom</frame_id>
