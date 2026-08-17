@@ -29,6 +29,7 @@ install(DIRECTORY meshes urdf launch rviz worlds config platform_docs models
 
 install(PROGRAMS
   scripts/rover_teleop.py
+  scripts/cmd_vel_arbiter.py
   scripts/sonar_to_range.py
   scripts/sensor_frame_aliases.py
   scripts/dock_monitor.py
@@ -36,6 +37,7 @@ install(PROGRAMS
   scripts/battery_publisher.py
   scripts/estop_manager.py
   scripts/diagnostics_aggregator.py
+  scripts/tf_relay.py
   scripts/rover_session_watchdog.py
   DESTINATION lib/${PROJECT_NAME}
 )
