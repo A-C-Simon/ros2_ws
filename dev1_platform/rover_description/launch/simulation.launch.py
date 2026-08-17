@@ -19,6 +19,13 @@ Launch args:
   num_rovers:=N            override fleet.num_rovers from swarm.yaml
   world:=<path>            absolute path to a .sdf world (default: test_station.sdf)
   full_sensors_all:=bool   override fleet.full_sensors_all from swarm.yaml
+  teleop:=bool             false = skip ONLY the Fleet Teleop terminal. Autonomy
+                           still reaches the rover: teleop writes to
+                           /<ns>/cmd_vel_teleop and goes silent at rest, and a
+                           cmd_vel_arbiter node muxes that with the autonomy
+                           input /<ns>/cmd_vel, forwarding the winner to the
+                           bridged /<ns>/cmd_vel_arb. The E-stop terminal and
+                           the session watchdog still run.
 """
 import os
 import re
@@ -179,6 +186,16 @@ def generate_rviz_config(template_path, rovers_modes):
         groups.append(group)
 
     cfg['Visualization Manager']['Displays'] = kept + groups
+    # Update the Nav2Panel's BT Navigator Node Name and Map topic
+    # to match the first rover.
+    for panel in cfg.get('Panels', []):
+        if panel.get('Class') == 'nav2_rviz_plugins/Navigation 2':
+            if rovers_modes:
+                panel['BT Navigator Node Name'] = f'/{rovers_modes[0][0]}/bt_navigator'
+    for d in cfg['Visualization Manager']['Displays']:
+        if d.get('Class') == 'rviz_default_plugins/Map':
+            if rovers_modes:
+                d['Topic']['Value'] = f'/{rovers_modes[0][0]}/map'
     # Saved window state references the 3-rover panel layout; drop it so RViz
     # lays out panels itself for any N.
     cfg.pop('Window Geometry', None)
@@ -212,16 +229,16 @@ def spawn_rover(namespace, pose, urdf_template, mode='scout'):
 
     nodes = []
 
-    # Static TF world → <ns>/odom at the rover's spawn pose. This is what
-    # gives every rover a common root in RViz — Fixed Frame `world` sees all N.
-    # The rover_i/odom → rover_i/base_link chain (from DiffDrive) hangs off this.
+    # Static TF map → <ns>/map at the rover's spawn pose.  Nav2 goals use
+    # frame_id='map' so this frame must exist; slam_toolbox publishes
+    # <ns>/map → <ns>/odom, so <ns>/map is the child here.
     nodes.append(Node(
         package='tf2_ros',
         executable='static_transform_publisher',
-        name=f'world_to_{namespace}_odom',
+        name=f'map_to_{namespace}_map',
         arguments=['--x', str(x), '--y', str(y), '--z', '0',
                    '--yaw', str(yaw),
-                   '--frame-id', 'world', '--child-frame-id', f'{namespace}/odom'],
+                   '--frame-id', 'map', '--child-frame-id', f'{namespace}/map'],
         parameters=[{'use_sim_time': True}],
     ))
 
@@ -257,7 +274,10 @@ def spawn_rover(namespace, pose, urdf_template, mode='scout'):
     # For lite rovers, drop the topics whose sensors were stripped from the URDF —
     # otherwise the bridge would sit waiting on messages that never arrive.
     bridge_args = [
-        f'/{namespace}/cmd_vel@geometry_msgs/msg/Twist]ignition.msgs.Twist',
+        # /<ns>/cmd_vel_arb is the arbiter's output — the ONLY writer the bridge
+        # forwards into the DiffDrive. Teleop and autonomy feed /<ns>/cmd_vel_teleop
+        # and /<ns>/cmd_vel respectively; cmd_vel_arbiter.py muxes them.
+        f'/{namespace}/cmd_vel_arb@geometry_msgs/msg/Twist]ignition.msgs.Twist',
         f'/{namespace}/odom@nav_msgs/msg/Odometry[ignition.msgs.Odometry',
         f'/{namespace}/joint_states@sensor_msgs/msg/JointState[ignition.msgs.Model',
         f'/{namespace}/imu@sensor_msgs/msg/Imu[ignition.msgs.IMU',
@@ -393,6 +413,7 @@ def _launch_setup(context, *args, **kwargs):
     actions.append(Node(
         package='rviz2',
         executable='rviz2',
+        namespace=rover_ns_list[0],
         arguments=['-d', rviz_generated],
         parameters=[{'use_sim_time': True}],
     ))
@@ -401,17 +422,36 @@ def _launch_setup(context, *args, **kwargs):
     # 'b' broadcasts identical twist to all (formation drive). Professional pattern:
     # one operator, one window, focus-select. Replaces the old N-terminal setup.
     # Spawn poses are passed so 'r' (reset) teleports each rover to its own pose.
+    # Skipped when teleop:=false. Either way the cmd_vel_arbiter below muxes the
+    # teleop's /<ns>/cmd_vel_teleop with the autonomy /<ns>/cmd_vel input.
+    teleop_arg = LaunchConfiguration('teleop').perform(context).lower()
+    with_teleop = teleop_arg not in ('0', 'false', 'no')
+    if with_teleop:
+        actions.append(Node(
+            package='rover_description',
+            executable='rover_teleop.py',
+            name='fleet_teleop',
+            arguments=['--rovers', *rover_ns_list,
+                       '--spawn-poses', *[f'{p[0]},{p[1]}' for p in poses],
+                       '--world', world_name],
+            parameters=[swarm_yaml, {'use_sim_time': True}],
+            prefix='gnome-terminal --wait --title="Fleet Teleop" --',
+            output='screen',
+            on_exit=Shutdown(),
+        ))
+
+    # Cmd-vel arbiter — single-writer mux in front of every rover's DiffDrive.
+    # Priority: /emergency_stop > /<ns>/cmd_vel_teleop (while fresh) >
+    # /<ns>/cmd_vel (autonomy) > zero. ALWAYS runs: with teleop it gives teleop
+    # priority only while keys are held (teleop is silent at rest); with
+    # teleop:=false it still forwards autonomy commands to the bridge.
     actions.append(Node(
         package='rover_description',
-        executable='rover_teleop.py',
-        name='fleet_teleop',
-        arguments=['--rovers', *rover_ns_list,
-                   '--spawn-poses', *[f'{p[0]},{p[1]}' for p in poses],
-                   '--world', world_name],
+        executable='cmd_vel_arbiter.py',
+        name='cmd_vel_arbiter',
+        arguments=['--rovers', *rover_ns_list],
         parameters=[swarm_yaml, {'use_sim_time': True}],
-        prefix='gnome-terminal --wait --title="Fleet Teleop" --',
         output='screen',
-        on_exit=Shutdown(),
     ))
 
     # Dock monitor — dock pose and thresholds come from swarm.yaml.
@@ -425,6 +465,8 @@ def _launch_setup(context, *args, **kwargs):
     ))
 
     # E-stop manager — fleet-wide /emergency_stop topic + keyboard-driven engage/release.
+    # Stays up even with teleop:=false (safety), and its terminal keeps the
+    # deliberate "close a terminal → whole session shuts down" behavior.
     actions.append(Node(
         package='rover_description',
         executable='estop_manager.py',
@@ -488,6 +530,8 @@ def generate_launch_description():
     # catches SIGINT/SIGTERM so launch's shutdown signals trigger the teardown
     # of Gazebo, RViz2, and any terminal-hosted scripts the launch service
     # missed. It also polls its parent so a SIGKILL'd launch still gets cleaned.
+    # Always runs — even with teleop:=false — preserving the one-terminal-kill
+    # session behavior.
     cleanup_script = os.path.join(pkg, 'scripts', 'kill_rover_session.sh')
     watchdog_script = os.path.join(pkg, 'scripts', 'rover_session_watchdog.py')
     session_watchdog = ExecuteProcess(
@@ -508,6 +552,12 @@ def generate_launch_description():
                                           '(heavy but comparable). false = only the first '
                                           'rover is scout, rest are lite (IMU + front sonar). '
                                           'Empty = use fleet.full_sensors_all from swarm.yaml.'),
+        DeclareLaunchArgument('teleop', default_value='true',
+                              description='false = skip the Fleet Teleop terminal. '
+                                          'Autonomy still drives the rover via the '
+                                          'cmd_vel_arbiter (which also gives teleop '
+                                          'priority while its keys are held). '
+                                          'E-stop + watchdog still run.'),
         set_resource_path,
         gz_sim,
         global_bridge,
