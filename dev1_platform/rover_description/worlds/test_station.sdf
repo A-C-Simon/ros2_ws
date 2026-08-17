@@ -19,6 +19,10 @@
     <plugin filename="ignition-gazebo-sensors-system" name="ignition::gazebo::systems::Sensors">
       <render_engine>ogre</render_engine>
     </plugin>
+    <!-- IMU sensors need their own system plugin (unlike gpu_lidar/camera which
+         the Sensors system handles directly). Without it the per-rover <sensor
+         type="imu"> tags are never instantiated, so /<ns>/imu never publishes. -->
+    <plugin filename="ignition-gazebo-imu-system" name="ignition::gazebo::systems::Imu"/>
 
     <light name="sun" type="directional">
       <pose>0 0 10 0 0 0</pose>
