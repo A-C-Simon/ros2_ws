@@ -11,6 +11,9 @@ Panels:
       - /Current View1
     Name: Views
     Splitter Ratio: 0.5
+  - Class: nav2_rviz_plugins/Navigation 2
+    Name: Navigation 2
+    BT Navigator Node Name: rover_0/bt_navigator
 Visualization Manager:
   Class: ""
   Displays:
@@ -187,7 +190,7 @@ Visualization Manager:
           Value: true
         rover_2/wheel_fr_link:
           Value: true
-        world:
+        map:
           Value: true
       Marker Scale: 1
       Name: TF
@@ -195,7 +198,7 @@ Visualization Manager:
       Show Axes: false
       Show Names: false
       Tree:
-        world:
+        map:
           rover_0/odom:
             rover_0/base_link:
               rover_0/base_link/imu:
@@ -318,6 +321,16 @@ Visualization Manager:
                 {}
       Update Interval: 0
       Value: true
+    - Class: rviz_default_plugins/Map
+      Enabled: true
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /rover_0/map
+      Name: SLAM Map
+      Use Timestamp: false
     - Class: rviz_common/Group
       Displays:
         - Alpha: 1
@@ -1145,12 +1158,20 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: world
+    Fixed Frame: map
     Frame Rate: 30
   Name: root
   Tools:
     - Class: rviz_default_plugins/MoveCamera
     - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/SetGoal
+      Name: 2D Nav Goal
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /goal_pose
   Transformation:
     Current:
       Class: rviz_default_plugins/TF
