@@ -11,12 +11,16 @@ This relay is namespace-aware:
   - Namespace → global: copies transforms as-is (keeps rover_0/odom etc.)
     so rviz and other global consumers see namespaced frames.
 
-Loop prevention:
-  - Tracks outbound frame pairs published to global, keyed by (frame pair,
-    stamp). Only the relay's own echo of a message is skipped — a NEW message
-    with the same frame pair but a different stamp still relays, so live
-    streams (e.g. DiffDrive odom -> base_link on global /tf) keep flowing
-    instead of being blacklisted after their first echo.
+Loop / echo prevention:
+  - Outbound tracker: frame pairs we published TO global /tf. on_global_tf
+    skips them so we don't relay our own echo back into namespaces.
+  - Inbound tracker:  frame pairs we relayed FROM global into a namespace
+    (with prefixed frame names). on_ns_tf skips them so we don't echo the
+    DiffDrive odom back to /tf with different frame names — which would
+    create a duplicate odom→base_link on global /tf (the bridge already
+    publishes the unprefixed version), confusing tf2.
+  - Both trackers key on (frame pair, stamp) so a NEW message with the same
+    frame pair but a different stamp still relays (live streams keep flowing).
 
 Usage:
     tf_relay.py --namespaces rover_0 rover_1
@@ -52,10 +56,19 @@ def _stamp_key(stamp):
 
 
 class _EchoTracker:
-    """Set of (frame pair, stamp) the relay already forwarded to the global
-    /tf. Keying on the stamp means only the relay's own echo of a message is
+    """Set of (frame pair, stamp) the relay already forwarded.
+
+    Keying on the stamp means only the relay's own echo of a message is
     skipped — a fresh message on the same frame pair still relays (a naive
-    pair-only set blacklists the whole stream after the first echo)."""
+    pair-only set blacklists the whole stream after the first echo).
+
+    Used in two directions:
+      - outbound: tracks transforms we published TO global (so on_global_tf
+        skips them and avoids an infinite loop).
+      - inbound:  tracks transforms we relayed FROM global into a namespace
+        (so on_ns_tf skips them and avoids echoing DiffDrive odom back to
+        global with different frame names, which would create a duplicate
+        odom→base_link on /tf that confuses tf2)."""
 
     def __init__(self, window_sec=60.0, cap=20000):
         self._entries = {}   # (pair, sec, nanosec) -> None
@@ -116,39 +129,67 @@ def main():
     global_dyn_pub = node.create_publisher(TFMessage, '/tf', _QOS_DYN_PUB)
     global_static_pub = node.create_publisher(TFMessage, '/tf_static', _QOS_STATIC_PUB)
 
-    # --- loop prevention: track (frame pair, stamp) echoes we published to global ---
-    outbound_global_dyn = _EchoTracker()   # echoes we published to /tf
-    outbound_global_static = _EchoTracker()  # echoes we published to /tf_static
+    # --- loop / echo prevention ---
+    # outbound: transforms WE published to global /tf — on_global_tf skips
+    #   them so we don't relay our own echo back into namespaces.
+    # inbound:  transforms we relayed FROM global into a namespace — on_ns_tf
+    #   skips them so we don't echo the DiffDrive odom back to /tf with
+    #   prefixed frame names (which would create a duplicate odom→base_link
+    #   on global /tf, confusing tf2).
+    outbound_global_dyn = _EchoTracker()
+    outbound_global_static = _EchoTracker()
+    inbound_from_global_dyn = _EchoTracker()
+    inbound_from_global_static = _EchoTracker()
 
     # --- global → namespaces (prefix frame names, skip our own echoes) ---
     def on_global_tf(msg, is_static=False):
         if is_static:
             skip = outbound_global_static
+            inbound = inbound_from_global_static
             fresh = [t for t in msg.transforms if not skip.contains(_frame_pair(t), t.header.stamp)]
             if fresh:
                 for ns in args.namespaces:
                     prefixed = [_prefix_transform(t, ns) for t in fresh]
                     static_pubs[ns].publish(TFMessage(transforms=prefixed))
+                # Record the prefixed frame pairs so on_ns_tf won't echo them
+                # back to global (which would create a duplicate with different
+                # frame names on /tf, confusing tf2).
+                for t in fresh:
+                    for ns in args.namespaces:
+                        pt = _prefix_transform(t, ns)
+                        inbound.add(_frame_pair(pt), t.header.stamp)
         else:
             skip = outbound_global_dyn
+            inbound = inbound_from_global_dyn
             fresh = [t for t in msg.transforms if not skip.contains(_frame_pair(t), t.header.stamp)]
             if fresh:
                 for ns in args.namespaces:
                     prefixed = [_prefix_transform(t, ns) for t in fresh]
                     dyn_pubs[ns].publish(TFMessage(transforms=prefixed))
+                for t in fresh:
+                    for ns in args.namespaces:
+                        pt = _prefix_transform(t, ns)
+                        inbound.add(_frame_pair(pt), t.header.stamp)
 
-    # --- namespaces → global (copy as-is, skip our own echoes) ---
+    # --- namespaces → global (copy as-is, skip our own echoes AND transforms
+    #     we relayed from global — those are already on /tf from the bridge) ---
     def on_ns_tf(msg, ns, is_static=False):
         if is_static:
             skip = outbound_global_static
-            fresh = [t for t in msg.transforms if not skip.contains(_frame_pair(t), t.header.stamp)]
+            inbound = inbound_from_global_static
+            fresh = [t for t in msg.transforms
+                     if not skip.contains(_frame_pair(t), t.header.stamp)
+                     and not inbound.contains(_frame_pair(t), t.header.stamp)]
             if fresh:
                 for t in fresh:
                     skip.add(_frame_pair(t), t.header.stamp)
                 global_static_pub.publish(TFMessage(transforms=fresh))
         else:
             skip = outbound_global_dyn
-            fresh = [t for t in msg.transforms if not skip.contains(_frame_pair(t), t.header.stamp)]
+            inbound = inbound_from_global_dyn
+            fresh = [t for t in msg.transforms
+                     if not skip.contains(_frame_pair(t), t.header.stamp)
+                     and not inbound.contains(_frame_pair(t), t.header.stamp)]
             if fresh:
                 for t in fresh:
                     skip.add(_frame_pair(t), t.header.stamp)

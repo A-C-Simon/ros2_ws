@@ -160,21 +160,33 @@ local_costmap:
           obstacle_min_range: 0.0
       always_send_full_costmap: True
 
+# Global costmap is a ROLLING WINDOW (mapless): no static map, so the planner
+# server never depends on a pre-saved map. slam_toolbox still maps on the go
+# in the background (publishes /<ns>/map for map_saver to save later); the
+# planner simply plans on local sensor data. Consequences:
+#   - waypoints must lie within the window (keep consecutive waypoints < ~9 m
+#     apart), paths through never-seen space are planned as straight lines
+#     (Navfn allow_unknown: true)
+#   - to go back to map-based navigation later (localization mode with the
+#     saved map), uncomment the static_layer block below
 global_costmap:
   global_costmap:
     ros__parameters:
-      update_frequency: 1.0
+      update_frequency: 3.0
       publish_frequency: 1.0
       global_frame: <robot_namespace>/map
       robot_base_frame: <robot_namespace>/base_link
       use_sim_time: True
       robot_radius: 0.18
       resolution: 0.05
+      rolling_window: true
+      width: 10
+      height: 10
       track_unknown_space: true
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
-      static_layer:
-        plugin: "nav2_costmap_2d::StaticLayer"
-        map_subscribe_transient_local: True
+      plugins: ["obstacle_layer", "inflation_layer"]
+      # static_layer:
+      #   plugin: "nav2_costmap_2d::StaticLayer"
+      #   map_subscribe_transient_local: True
       obstacle_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True

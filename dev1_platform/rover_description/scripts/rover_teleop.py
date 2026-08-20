@@ -16,7 +16,10 @@ Controls:
   b             broadcast toggle — same twist to ALL rovers (formation drive)
   q / a         active rover max linear speed +20% / -20%
   w / s         active rover max turn rate   +20% / -20%
-  R             reset active rover to its spawn pose
+  R             restart the whole session with the same launch args: fresh SLAM
+                map, fresh gazebo and a rover that starts exactly at its spawn
+                pose in RViz (the gz odom can't be reset in place, so a session
+                restart is the only accurate reset); takes ~90 s
   ?             reprint help
   Ctrl+C        quit
 
@@ -37,6 +40,10 @@ URDF DiffDrive plugin's max_linear_acceleration / max_angular_acceleration.
 Mismatched limits cause double-filtering and constant jerk.
 """
 import argparse
+import math
+import os
+import shlex
+import signal
 import sys
 import select
 import termios
@@ -84,23 +91,95 @@ def get_key(poll=PUBLISH_PERIOD):
     return key
 
 
-def reset_rover(name, x=0.0, y=0.0, world='test_station'):
+def reset_rover(name, x=0.0, y=0.0, yaw=0.0, world='test_station'):
+    """Teleport the model back to its spawn pose (position AND orientation)."""
     subprocess.run([
         'ign', 'service', '-s', f'/world/{world}/set_pose',
         '--reqtype', 'ignition.msgs.Pose',
         '--reptype', 'ignition.msgs.Boolean',
         '--timeout', '500',
-        '--req', f'name: "{name}", position: {{x: {x}, y: {y}, z: 0.2}}, orientation: {{w: 1}}',
+        '--req',
+        f'name: "{name}", position: {{x: {x}, y: {y}, z: 0.2}}, '
+        f'orientation: {{z: {math.sin(yaw / 2):.4f}, w: {math.cos(yaw / 2):.4f}}}',
     ], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def reset_slam(namespace):
+    """Kill this rover's slam_toolbox so nav2_stack (respawn) restarts it.
+
+    A respawned slam_toolbox starts with an empty pose graph, so the SLAM map
+    clears. In-place fallback only: the R key normally restarts the whole
+    session, because the gz DiffDrive's wheel-integrated odom can't be reset
+    in place (teleports never move it, and model respawns crash this machine's
+    gz/rviz2), so RViz would keep the accumulated drift and drift off the map.
+    """
+    subprocess.run(
+        ['pkill', '-f', f'sync_slam_toolbox_node.*__ns:=/{namespace}'],
+        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def find_launch_argv():
+    """Walk the parent chain for the ros2 launch command line of this session.
+
+    Returns (argv, pid) of the process running rover_swarm.launch.py (the
+    session the teleop belongs to), or (None, None). Used by the R key to
+    restart the session with the same arguments.
+    """
+    pid = os.getppid()
+    while pid > 1:
+        try:
+            with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                raw = f.read()
+            argv = [a for a in raw.split(b'\x00') if a]
+            args = [a.decode() for a in argv]
+            if any('rover_swarm.launch.py' in a for a in args):
+                return args, pid
+        except OSError:
+            return None, None
+        try:
+            with open(f'/proc/{pid}/stat', 'rb') as f:
+                parts = f.read().split()
+            pid = int(parts[3])  # ppid field
+        except (OSError, ValueError, IndexError):
+            return None, None
+    return None, None
+
+
+def restart_session():
+    """Restart the whole session with the same launch command.
+
+    The gz DiffDrive's odom is wheel-integrated: teleports never reset it and
+    in-place model respawns crash gz/rviz2 on this machine. The only reliable
+    way to reset odom is a fresh session, which also clears the SLAM map and
+    starts the rover exactly at its spawn pose in both gazebo and RViz.
+    The relaunch is delayed so the old session's watchdog cleanup (killed
+    launch tree) finishes first. Returns True if a relaunch was scheduled.
+    """
+    argv, launch_pid = find_launch_argv()
+    if not argv:
+        return False
+    cmd = ' '.join(shlex.quote(a) for a in argv)
+    log = '/tmp/opencode/rover_session_restart.log'
+    subprocess.Popen(
+        ['setsid', 'bash', '-c',
+         f'sleep 8; {cmd} > {log} 2>&1'],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        os.kill(launch_pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        pass
+    return True
 
 
 class RoverState:
     """Per-rover: publisher + ramp state + reset pose."""
-    def __init__(self, node, namespace, spawn_x, spawn_y, cfg):
+    def __init__(self, node, namespace, spawn_x, spawn_y, spawn_z, spawn_yaw, cfg):
         self.cfg = cfg
         self.namespace = namespace
         self.spawn_x = spawn_x
         self.spawn_y = spawn_y
+        self.spawn_z = spawn_z
+        self.spawn_yaw = spawn_yaw
         # Teleop writes its OWN twist topic. A separate cmd_vel_arbiter node
         # (scripts/cmd_vel_arbiter.py) muxes /<ns>/cmd_vel_teleop with the
         # autonomy input /<ns>/cmd_vel and forwards the winner to the bridged
@@ -262,7 +341,7 @@ def print_help(rovers, active_idx, broadcast, cfg):
         '  arrows accelerate / release coasts to stop   SPACE hard stop\r\n'
         '  status v/ω + a/α at 2 Hz while moving\r\n'
         '  1..9 select rover   b broadcast toggle   q/a speed ±20%   w/s turn ±20%\r\n'
-        '  R reset active rover   ? help   Ctrl+C quit\r\n'
+        '  R reset rover + SLAM map   ? help   Ctrl+C quit\r\n'
     )
     sys.stdout.flush()
 
@@ -339,8 +418,9 @@ def main():
     ap.add_argument('--rovers', nargs='+', default=None,
                     help='Multi-rover mode: space-separated namespaces (e.g. rover_0 rover_1 rover_2)')
     ap.add_argument('--spawn-poses', nargs='+', default=None,
-                    help='Per-rover spawn poses as "x,y" pairs, aligned with --rovers. '
-                         'Comes from swarm.yaml via the launch file; used by the R reset key. '
+                    help='Per-rover spawn poses as "x,y,z,yaw" tuples, aligned with --rovers. '
+                         'Comes from swarm.yaml via the launch file; used by the R reset key '
+                         '(the session restart starts the rover exactly at its spawn pose). '
                          'Overrides --spawn-spacing.')
     ap.add_argument('--spawn-spacing', type=float, default=0.8,
                     help='Fallback Y spacing between rovers when --spawn-poses is absent. Default 0.8.')
@@ -370,18 +450,27 @@ def main():
     # Build the rover roster. Multi-rover form wins if provided; else fall back to legacy single.
     if args.rovers:
         if args.spawn_poses and len(args.spawn_poses) == len(args.rovers):
-            spawn_xy = [tuple(float(v) for v in p.split(',')[:2]) for p in args.spawn_poses]
+            spawn_xy = []
+            for p in args.spawn_poses:
+                vals = [float(v) for v in p.split(',')]
+                if len(vals) == 2:
+                    vals += [0.15, 0.0]
+                elif len(vals) == 3:
+                    vals.insert(2, 0.15)
+                spawn_xy.append(tuple(vals))
         else:
             if args.spawn_poses:
                 sys.stderr.write('rover_teleop: --spawn-poses count != --rovers count; '
                                  'falling back to --spawn-spacing line layout\n')
-            spawn_xy = [(args.spawn_x, i * args.spawn_spacing) for i in range(len(args.rovers))]
+            spawn_xy = [(args.spawn_x, i * args.spawn_spacing, 0.15, 0.0)
+                        for i in range(len(args.rovers))]
         rovers = [
             RoverState(node, ns, *spawn_xy[i], cfg)
             for i, ns in enumerate(args.rovers)
         ]
     else:
-        rovers = [RoverState(node, args.namespace, args.spawn_x, args.spawn_y, cfg)]
+        rovers = [RoverState(node, args.namespace, args.spawn_x, args.spawn_y,
+                             0.15, 0.0, cfg)]
 
     active_idx = 0
     broadcast = False
@@ -471,16 +560,24 @@ def main():
                 # LOWERCASE only. Uppercase 'R' avoids collision with any stray
                 # follow-byte from a garbled escape sequence.
                 name = active.namespace if active.namespace else 'rover'
-                reset_rover(name, active.spawn_x, active.spawn_y, args.world)
-                # Clear the motion state so the rover doesn't keep driving right
-                # after the teleport.
+                if restart_session():
+                    sys.stdout.write('\r  session restarting with the same launch args (fresh map and spawn pose in ~90 s)...\r\n'); sys.stdout.flush()
+                    time.sleep(1.0)
+                    break
+                # Fallback (teleop run standalone): teleport the model back to
+                # its spawn pose and restart the SLAM map. RViz keeps the gz
+                # DiffDrive's odom drift in this mode.
+                reset_rover(name, active.spawn_x, active.spawn_y,
+                            active.spawn_yaw, args.world)
+                if active.namespace:
+                    reset_slam(active.namespace)
                 active.target_lin, active.target_ang = 0.0, 0.0
                 active.cur_lin, active.cur_ang = 0.0, 0.0
                 active.lin_active = False
                 active.ang_active = False
                 active.last_lin_arrow = 0.0
                 active.last_ang_arrow = 0.0
-                sys.stdout.write(f'\r  {name} reset to ({active.spawn_x:.1f}, {active.spawn_y:.1f})\r\n'); sys.stdout.flush()
+                sys.stdout.write(f'\r  {name} reset to spawn; map re-centering\r\n'); sys.stdout.flush()
             elif key == '\x03':  # Ctrl+C
                 break
 
