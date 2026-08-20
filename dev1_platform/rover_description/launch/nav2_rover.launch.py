@@ -22,6 +22,7 @@ def generate_launch_description():
     slam = LaunchConfiguration('slam')
     autostart = LaunchConfiguration('autostart')
     use_composition = LaunchConfiguration('use_composition')
+    ground_truth = LaunchConfiguration('ground_truth')
 
     sim_launch = os.path.join(rover_description_dir, 'launch', 'simulation.launch.py')
     stack_launch = os.path.join(rover_description_dir, 'launch', 'nav2_stack.launch.py')
@@ -52,11 +53,17 @@ def generate_launch_description():
             'use_composition', default_value='False',
             description='Use composed bringup if True (separate processes are easier to debug)'),
 
+        DeclareLaunchArgument(
+            'ground_truth', default_value='true',
+            description='true (default) = autonomy runs on Gazebo ground-truth odometry; '
+                        'false = realistic encoder odometry with wheel slip'),
+
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(sim_launch),
             launch_arguments={
                 'num_rovers': num_rovers,
                 'teleop': teleop,
+                'ground_truth': ground_truth,
             }.items()),
 
         # Mirror the global sim TF into the rover namespace for the nav2 stack.
