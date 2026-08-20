@@ -344,6 +344,101 @@ Visualization Manager:
             History Policy: Keep Last
             Reliability Policy: Reliable
             Value: /rover_0/robot_description
+          Enabled: false
+          Links:
+            All Links Enabled: true
+            Expand Joint Details: false
+            Expand Link Details: false
+            Expand Tree: false
+            Link Tree Style: Links in Alphabetic Order
+            base_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            camera_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            camera_optical_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+            lidar_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            sonar_front_left_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            sonar_front_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            sonar_front_right_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            sonar_rear_left_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            sonar_rear_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            sonar_rear_right_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            wheel_bl_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            wheel_br_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            wheel_fl_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+            wheel_fr_link:
+              Alpha: 1
+              Show Axes: false
+              Show Trail: false
+              Value: true
+          Mass Properties:
+            Inertia: false
+            Mass: false
+          Name: RobotModel (odom belief)
+          TF Prefix: rover_0
+          Update Interval: 0
+          Value: false
+          Visual Enabled: true
+        - Alpha: 1
+          Class: rviz_default_plugins/RobotModel
+          Collision Enabled: false
+          Description File: ""
+          Description Source: Topic
+          Description Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /rover_0/robot_description
           Enabled: true
           Links:
             All Links Enabled: true
@@ -423,8 +518,8 @@ Visualization Manager:
           Mass Properties:
             Inertia: false
             Mass: false
-          Name: RobotModel
-          TF Prefix: rover_0
+          Name: RobotModel (Gazebo truth)
+          TF Prefix: rover_0/gt_
           Update Interval: 0
           Value: true
           Visual Enabled: true
@@ -446,7 +541,7 @@ Visualization Manager:
           Max Intensity: 4096
           Min Color: 0; 0; 0
           Min Intensity: 0
-          Name: LiDAR PointCloud
+          Name: LiDAR PointCloud (GT)
           Position Transformer: XYZ
           Selectable: true
           Size (Pixels): 3
@@ -458,7 +553,7 @@ Visualization Manager:
             Filter size: 10
             History Policy: Keep Last
             Reliability Policy: Best Effort
-            Value: /rover_0/lidar/points
+            Value: /rover_0/gt/lidar/points
           Use Fixed Frame: true
           Use rainbow: true
           Value: true
@@ -529,6 +624,13 @@ Visualization Manager:
             Reliability Policy: Reliable
             Value: /rover_0/odom
           Value: true
+        - Class: rviz_default_plugins/Axes
+          Enabled: true
+          Length: 0.30000001192092896
+          Name: Ground Truth (Gazebo)
+          Radius: 0.019999999552965164
+          Reference Frame: rover_0/gt_base_link
+          Value: true
         - Alpha: 0.4000000059604645
           Buffer Length: 1
           Class: rviz_default_plugins/Range
@@ -541,7 +643,7 @@ Visualization Manager:
             Filter size: 10
             History Policy: Keep Last
             Reliability Policy: Best Effort
-            Value: /rover_0/sonar/front/range
+            Value: /rover_0/gt/sonar/front/range
           Value: true
         - Alpha: 0.4000000059604645
           Buffer Length: 1
@@ -555,7 +657,7 @@ Visualization Manager:
             Filter size: 10
             History Policy: Keep Last
             Reliability Policy: Best Effort
-            Value: /rover_0/sonar/front_right/range
+            Value: /rover_0/gt/sonar/front_right/range
           Value: true
         - Alpha: 0.4000000059604645
           Buffer Length: 1
@@ -569,7 +671,7 @@ Visualization Manager:
             Filter size: 10
             History Policy: Keep Last
             Reliability Policy: Best Effort
-            Value: /rover_0/sonar/front_left/range
+            Value: /rover_0/gt/sonar/front_left/range
           Value: true
         - Alpha: 0.4000000059604645
           Buffer Length: 1
@@ -583,7 +685,7 @@ Visualization Manager:
             Filter size: 10
             History Policy: Keep Last
             Reliability Policy: Best Effort
-            Value: /rover_0/sonar/rear/range
+            Value: /rover_0/gt/sonar/rear/range
           Value: true
         - Alpha: 0.4000000059604645
           Buffer Length: 1
@@ -597,7 +699,7 @@ Visualization Manager:
             Filter size: 10
             History Policy: Keep Last
             Reliability Policy: Best Effort
-            Value: /rover_0/sonar/rear_right/range
+            Value: /rover_0/gt/sonar/rear_right/range
           Value: true
         - Alpha: 0.4000000059604645
           Buffer Length: 1
@@ -611,7 +713,7 @@ Visualization Manager:
             Filter size: 10
             History Policy: Keep Last
             Reliability Policy: Best Effort
-            Value: /rover_0/sonar/rear_left/range
+            Value: /rover_0/gt/sonar/rear_left/range
           Value: true
       Enabled: true
       Name: rover_0
@@ -1158,7 +1260,7 @@ Visualization Manager:
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
-    Fixed Frame: map
+    Fixed Frame: rover_0/map
     Frame Rate: 30
   Name: root
   Tools:
@@ -1172,6 +1274,22 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /goal_pose
+    - Class: nav2_rviz_plugins/GoalTool
+      Name: Nav2 Goal
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /goal_pose 
+    - Class: rviz_default_plugins/SetInitialPose
+      Name: 2D Pose Estimate
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /initialpose
   Transformation:
     Current:
       Class: rviz_default_plugins/TF

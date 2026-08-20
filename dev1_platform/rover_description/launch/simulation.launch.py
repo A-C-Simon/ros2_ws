@@ -213,7 +213,7 @@ LITE_STRIP_RE = re.compile(
 )
 
 
-def spawn_rover(namespace, pose, urdf_template, mode='scout'):
+def spawn_rover(namespace, pose, urdf_template, mode='scout', ground_truth=True):
     """Return the list of Nodes that bring up ONE rover under `namespace`.
 
     pose is (x, y, z, yaw) from swarm.yaml (explicit entry or line layout).
@@ -221,6 +221,8 @@ def spawn_rover(namespace, pose, urdf_template, mode='scout'):
     mode='lite'  removes lidar and 5 of the 6 sonars — leaving IMU + camera +
     front sonar. The URDF markers get stripped and the ROS-side
     bridge/publisher list shrinks to match, so no orphan topics.
+    ground_truth=True skips bridging the DiffDrive's encoder /<ns>/odom —
+    ground_truth_tf.py publishes that topic from the true pose instead.
     """
     ns_urdf = urdf_template.replace('__NS__', namespace)
     if mode == 'lite':
@@ -256,6 +258,24 @@ def spawn_rover(namespace, pose, urdf_template, mode='scout'):
         }],
     ))
 
+    # Second RSP mirroring the SAME link tree under the `<ns>/gt_` prefix
+    # (gt_base_link → gt_wheel_fl_link etc.), fed by the same /joint_states —
+    # i.e. real physics wheel angles. ground_truth_tf.py anchors
+    # map → <ns>/gt_base_link from Gazebo's PosePublisher, so RViz can render
+    # a fully-articulated robot at the TRUE pose ("RobotModel (Gazebo truth)"
+    # display). Purely additive: no existing frame/topic changes hands.
+    nodes.append(Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        namespace=namespace,
+        name='gt_state_publisher',
+        parameters=[{
+            'robot_description': ns_urdf,
+            'use_sim_time': True,
+            'frame_prefix': f'{namespace}/gt_',
+        }],
+    ))
+
     # Spawn the model into Ignition. -topic is relative to the node's namespace.
     nodes.append(Node(
         package='ros_gz_sim',
@@ -278,13 +298,23 @@ def spawn_rover(namespace, pose, urdf_template, mode='scout'):
         # forwards into the DiffDrive. Teleop and autonomy feed /<ns>/cmd_vel_teleop
         # and /<ns>/cmd_vel respectively; cmd_vel_arbiter.py muxes them.
         f'/{namespace}/cmd_vel_arb@geometry_msgs/msg/Twist]ignition.msgs.Twist',
-        f'/{namespace}/odom@nav_msgs/msg/Odometry[ignition.msgs.Odometry',
+        # Ground-truth world pose from the URDF's PosePublisher plugin →
+        # ground_truth_tf.py rebroadcasts it as TF map → <ns>/gt_base_link.
+        f'/model/{namespace}/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
         f'/{namespace}/joint_states@sensor_msgs/msg/JointState[ignition.msgs.Model',
         f'/{namespace}/imu@sensor_msgs/msg/Imu[ignition.msgs.IMU',
         f'/{namespace}/sonar/front@sensor_msgs/msg/LaserScan[ignition.msgs.LaserScan',
         # Camera kept for every rover (moved out of the lite-strip block in the URDF).
         f'/{namespace}/camera/image@sensor_msgs/msg/Image[ignition.msgs.Image',
     ]
+    if not ground_truth:
+        # Encoder mode only: bridge the DiffDrive's odometry. In GT mode this
+        # is deliberately NOT bridged — ground_truth_tf.py --publish-odom
+        # publishes /<ns>/odom from the true pose instead (two publishers on
+        # one topic would interleave garbage), and the plugin's TF is diverted
+        # to /<ns>/encoder_tf inside gz (see the URDF __DIFF_TF_TOPIC__ token).
+        bridge_args.append(
+            f'/{namespace}/odom@nav_msgs/msg/Odometry[ignition.msgs.Odometry')
     if mode == 'scout':
         bridge_args += [
             f'/{namespace}/lidar@sensor_msgs/msg/LaserScan[ignition.msgs.LaserScan',
@@ -359,6 +389,19 @@ def _launch_setup(context, *args, **kwargs):
     with open(urdf_path, 'r') as f:
         urdf_template = f.read()
 
+    # ground_truth:=true (default) → divert the DiffDrive's encoder-odometry
+    # TF to a dead-end gz topic and DON'T bridge /<ns>/odom; ground_truth_tf.py
+    # --publish-odom then supplies <ns>/odom → <ns>/base_link TF + the
+    # /<ns>/odom topic from Gazebo's true pose (planar, spawn-relative — same
+    # interface as encoder odometry). ground_truth:=false → the DiffDrive's
+    # realistic skid-slip odometry feeds everything (SLAM benchmarking).
+    gt_arg = LaunchConfiguration('ground_truth').perform(context).lower()
+    ground_truth = gt_arg not in ('0', 'false', 'no')
+    diff_tf_topic = '__NS__/encoder_tf' if ground_truth else '/tf'
+    print(f'[simulation.launch.py] ground_truth={ground_truth} '
+          f'(DiffDrive TF → {diff_tf_topic})')
+    urdf_template = urdf_template.replace('__DIFF_TF_TOPIC__', diff_tf_topic)
+
     swarm_yaml = os.path.join(pkg, 'config', 'swarm.yaml')
     fleet = load_fleet_config(swarm_yaml)
 
@@ -401,7 +444,8 @@ def _launch_setup(context, *args, **kwargs):
         mode = 'scout' if (full_all or i == 0) else 'lite'
         print(f'[simulation.launch.py] {ns}: {mode.upper()} @ '
               f'(x={pose[0]}, y={pose[1]}, z={pose[2]}, yaw={pose[3]})')
-        actions.extend(spawn_rover(ns, pose, urdf_template, mode=mode))
+        actions.extend(spawn_rover(ns, pose, urdf_template, mode=mode,
+                                   ground_truth=ground_truth))
         modes.append(mode)
 
     # RViz config generated for exactly this fleet — one display group per
@@ -432,7 +476,7 @@ def _launch_setup(context, *args, **kwargs):
             executable='rover_teleop.py',
             name='fleet_teleop',
             arguments=['--rovers', *rover_ns_list,
-                       '--spawn-poses', *[f'{p[0]},{p[1]}' for p in poses],
+                       '--spawn-poses', *[f'{p[0]},{p[1]},{p[2]},{p[3]}' for p in poses],
                        '--world', world_name],
             parameters=[swarm_yaml, {'use_sim_time': True}],
             prefix='gnome-terminal --wait --title="Fleet Teleop" --',
@@ -451,6 +495,36 @@ def _launch_setup(context, *args, **kwargs):
         name='cmd_vel_arbiter',
         arguments=['--rovers', *rover_ns_list],
         parameters=[swarm_yaml, {'use_sim_time': True}],
+        output='screen',
+    ))
+
+    # Ground-truth TF — ONE node for the whole fleet (same pattern as
+    # tf_relay). Converts the bridged /model/<ns>/pose (gz world pose from
+    # the URDF PosePublisher) into TF map → <ns>/gt_base_link on global /tf.
+    # In ground_truth mode (default) it also supplies <ns>/odom →
+    # <ns>/base_link TF + the /<ns>/odom topic (planar, spawn-relative truth)
+    # because the DiffDrive encoder odometry is diverted/unbridged.
+    gt_tf_args = ['--namespaces', *rover_ns_list]
+    if ground_truth:
+        gt_tf_args.append('--publish-odom')
+    actions.append(Node(
+        package='rover_description',
+        executable='ground_truth_tf.py',
+        name='ground_truth_tf',
+        arguments=gt_tf_args,
+        parameters=[{'use_sim_time': True}],
+        output='screen',
+    ))
+
+    # GT sensor relay — republishes /<ns>/lidar/points + /<ns>/sonar/*/range on
+    # /<ns>/gt/... with frame_ids swapped to the gt_ mirror links, so RViz draws
+    # sensor data at the TRUE pose (RViz-only; originals untouched for Nav2/SLAM).
+    actions.append(Node(
+        package='rover_description',
+        executable='gt_sensor_relay.py',
+        name='gt_sensor_relay',
+        arguments=['--namespaces', *rover_ns_list],
+        parameters=[{'use_sim_time': True}],
         output='screen',
     ))
 
@@ -558,6 +632,12 @@ def generate_launch_description():
                                           'cmd_vel_arbiter (which also gives teleop '
                                           'priority while its keys are held). '
                                           'E-stop + watchdog still run.'),
+        DeclareLaunchArgument('ground_truth', default_value='true',
+                              description='true (default) = DiffDrive odometry comes from '
+                                          'Gazebo ground truth (odom_source=world): SLAM map, '
+                                          'Nav2 waypoint following and cslam all run on the '
+                                          'true pose. false = realistic encoder odometry with '
+                                          'skid-steer wheel slip (SLAM benchmarking).'),
         set_resource_path,
         gz_sim,
         global_bridge,

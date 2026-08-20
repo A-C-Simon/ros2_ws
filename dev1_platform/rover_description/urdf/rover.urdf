@@ -581,10 +581,43 @@
            muxes /__NS__/cmd_vel (autonomy) and /__NS__/cmd_vel_teleop (teleop). -->
       <topic>__NS__/cmd_vel_arb</topic>
       <odom_topic>__NS__/odom</odom_topic>
-      <tf_topic>/tf</tf_topic>
+      <!-- __DIFF_TF_TOPIC__ is substituted by simulation.launch.py from the
+           ground_truth launch arg (default true):
+             ground_truth:=true  → '__NS__/encoder_tf': the plugin's ENCODER
+                                   odometry TF is diverted to a dead-end gz
+                                   topic (never bridged to ROS), and
+                                   ground_truth_tf.py (publish-odom flag)
+                                   supplies the <ns>/odom → <ns>/base_link TF
+                                   and the /<ns>/odom topic from Gazebo's true
+                                   pose. SLAM map, Nav2 and cslam then run on
+                                   ground truth.
+             ground_truth:=false → '/tf': realistic skid-slip dead reckoning
+                                   (SLAM benchmarking mode).
+           Fortress's DiffDrive has no <odom_source> param (that arrived in
+           gz-sim7/Garden) and ALWAYS publishes TF, hence the diversion. -->
+      <tf_topic>__DIFF_TF_TOPIC__</tf_topic>
       <frame_id>__NS__/odom</frame_id>
       <child_frame_id>__NS__/base_link</child_frame_id>
       <odom_publish_frequency>30</odom_publish_frequency>
+    </plugin>
+
+    <!-- Ground-truth model pose: publishes ignition.msgs.Pose (world frame)
+         at 30 Hz on gz topic /model/<ns>/pose. The per-rover bridge forwards
+         it to ROS as PoseStamped and ground_truth_tf.py rebroadcasts it as
+         TF map -> __NS__/gt_base_link, so RViz can render a fully-articulated
+         robot model at the pose the rover ACTUALLY has (including blocked
+         wheels and flips) next to the encoder-only DiffDrive odometry.
+         Fortress quirks (ign-gazebo6, verified against PosePublisher.cc):
+           - the topic is hardcoded to /model/<name>/pose (no <topic> param);
+           - the top-level model pose is only published when BOTH
+             publish_nested_model_pose AND publish_model_pose are true;
+           - publish_link_pose defaults true and must be disabled or every
+             link spams the same topic. -->
+    <plugin filename="ignition-gazebo-pose-publisher-system" name="ignition::gazebo::systems::PosePublisher">
+      <publish_link_pose>false</publish_link_pose>
+      <publish_nested_model_pose>true</publish_nested_model_pose>
+      <publish_model_pose>true</publish_model_pose>
+      <update_frequency>30</update_frequency>
     </plugin>
   </gazebo>
 

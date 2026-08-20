@@ -38,6 +38,8 @@ install(PROGRAMS
   scripts/estop_manager.py
   scripts/diagnostics_aggregator.py
   scripts/tf_relay.py
+  scripts/ground_truth_tf.py
+  scripts/gt_sensor_relay.py
   scripts/rover_session_watchdog.py
   DESTINATION lib/${PROJECT_NAME}
 )
