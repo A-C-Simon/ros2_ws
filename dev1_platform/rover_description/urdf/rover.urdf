@@ -390,12 +390,17 @@
   <gazebo reference="base_link">
     <visual><material><ambient>0.75 0.75 0.78 1</ambient><diffuse>0.75 0.75 0.78 1</diffuse><specular>0.2 0.2 0.2 1</specular></material></visual>
   </gazebo>
-  <!-- Per-wheel friction + contact softness. mu1 (roll dir) < mu2 (lateral) prevents stick-slip judder;
-       kp/kd soften ground contact so light 1.2 kg chassis doesn't chatter on micro-bumps. -->
-  <gazebo reference="wheel_fr_link"><mu1>0.8</mu1><mu2>0.5</mu2><kp>1000000.0</kp><kd>100.0</kd><minDepth>0.001</minDepth><maxVel>0.1</maxVel><visual><material><ambient>0.15 0.15 0.15 1</ambient><diffuse>0.15 0.15 0.15 1</diffuse></material></visual></gazebo>
-  <gazebo reference="wheel_fl_link"><mu1>0.8</mu1><mu2>0.5</mu2><kp>1000000.0</kp><kd>100.0</kd><minDepth>0.001</minDepth><maxVel>0.1</maxVel><visual><material><ambient>0.15 0.15 0.15 1</ambient><diffuse>0.15 0.15 0.15 1</diffuse></material></visual></gazebo>
-  <gazebo reference="wheel_br_link"><mu1>0.8</mu1><mu2>0.5</mu2><kp>1000000.0</kp><kd>100.0</kd><minDepth>0.001</minDepth><maxVel>0.1</maxVel><visual><material><ambient>0.15 0.15 0.15 1</ambient><diffuse>0.15 0.15 0.15 1</diffuse></material></visual></gazebo>
-  <gazebo reference="wheel_bl_link"><mu1>0.8</mu1><mu2>0.5</mu2><kp>1000000.0</kp><kd>100.0</kd><minDepth>0.001</minDepth><maxVel>0.1</maxVel><visual><material><ambient>0.15 0.15 0.15 1</ambient><diffuse>0.15 0.15 0.15 1</diffuse></material></visual></gazebo>
+  <!-- Per-wheel friction + contact softness. Symmetric mu1/mu2 for skid-steer so
+       lateral scrub during rotation isn't artificially stiffer than rolling;
+       kp/kd soften ground contact so the light chassis doesn't chatter on micro-bumps.
+       maxVel was 0.1 m/s and caused a "virtual mud" effect: the contact solver clamped
+       wheel-ground slip speed to 0.1 m/s, so teleop commands above that felt stuck.
+       Raised to 100 m/s to keep the jitter limit in name only while letting the rover
+       actually drive; minDepth still prevents micro-bump chatter. -->
+  <gazebo reference="wheel_fr_link"><mu1>0.9</mu1><mu2>0.9</mu2><kp>1000000.0</kp><kd>100.0</kd><minDepth>0.001</minDepth><maxVel>100.0</maxVel><visual><material><ambient>0.15 0.15 0.15 1</ambient><diffuse>0.15 0.15 0.15 1</diffuse></material></visual></gazebo>
+  <gazebo reference="wheel_fl_link"><mu1>0.9</mu1><mu2>0.9</mu2><kp>1000000.0</kp><kd>100.0</kd><minDepth>0.001</minDepth><maxVel>100.0</maxVel><visual><material><ambient>0.15 0.15 0.15 1</ambient><diffuse>0.15 0.15 0.15 1</diffuse></material></visual></gazebo>
+  <gazebo reference="wheel_br_link"><mu1>0.9</mu1><mu2>0.9</mu2><kp>1000000.0</kp><kd>100.0</kd><minDepth>0.001</minDepth><maxVel>100.0</maxVel><visual><material><ambient>0.15 0.15 0.15 1</ambient><diffuse>0.15 0.15 0.15 1</diffuse></material></visual></gazebo>
+  <gazebo reference="wheel_bl_link"><mu1>0.9</mu1><mu2>0.9</mu2><kp>1000000.0</kp><kd>100.0</kd><minDepth>0.001</minDepth><maxVel>100.0</maxVel><visual><material><ambient>0.15 0.15 0.15 1</ambient><diffuse>0.15 0.15 0.15 1</diffuse></material></visual></gazebo>
   <gazebo reference="lidar_link"><visual><material><ambient>0.1 0.4 0.9 1</ambient><diffuse>0.1 0.4 0.9 1</diffuse></material></visual></gazebo>
   <gazebo reference="camera_link"><visual><material><ambient>0.25 0.25 0.28 1</ambient><diffuse>0.25 0.25 0.28 1</diffuse></material></visual></gazebo>
   <gazebo reference="sonar_front_link"><visual><material><ambient>0.1 0.85 0.25 1</ambient><diffuse>0.1 0.85 0.25 1</diffuse></material></visual></gazebo>

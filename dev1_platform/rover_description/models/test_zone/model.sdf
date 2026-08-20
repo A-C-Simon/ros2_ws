@@ -20,6 +20,22 @@
             <uri>model://test_zone/meshes/building.dae</uri>
           </mesh>
         </geometry>
+        <surface>
+          <friction>
+            <ode>
+              <mu>1.0</mu>
+              <mu2>1.0</mu2>
+            </ode>
+          </friction>
+          <contact>
+            <ode>
+              <kp>1000000.0</kp>
+              <kd>100.0</kd>
+              <minDepth>0.001</minDepth>
+              <maxVel>100.0</maxVel>
+            </ode>
+          </contact>
+        </surface>
       </collision>
       <visual name="visual">
         <pose>-8.12 8.8 0 1.57 0 0</pose>
