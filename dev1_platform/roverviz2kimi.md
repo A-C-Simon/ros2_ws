@@ -317,3 +317,111 @@ executable), already-started children (gz, bridges, rviz, arbiter) can leak —
 the session watchdog does not always reap them. If a session fails at startup,
 check `pgrep -af 'ign gazebo|parameter_bridge|cmd_vel_arbiter'` before
 relaunching. (Observed once during this fix's test-run; cleaned up manually.)
+
+## Why the LiDAR point cloud stopped rotating with the rover
+
+The point-cloud rotation bug was a side effect of the belief-chain frame
+assignment, not of the points themselves.
+
+The simulated LiDAR publishes `sensor_msgs/PointCloud2` on
+`/<ns>/lidar/points` with `header.frame_id = <ns>/base_link/lidar` (the URDF
+frame attached to the belief chain). RViz transforms the cloud from that frame
+into `map` using the current TF tree:
+
+```
+map -> <ns>/odom -> <ns>/base_link -> ... -> <ns>/base_link/lidar
+```
+
+The cloud coordinates are already expressed in the lidar sensor frame, so all
+RViz does is apply the chain of transforms. When the belief chain drifts
+relative to ground truth, the sensor frame is carried with that drift, and the
+cloud goes with it. During a skid-steer rotation the yaw divergence is largest,
+so the cloud visibly rotates around the wrong pose.
+
+The fix is purely a header rewrite. `gt_sensor_relay.py` subscribes to the
+original point cloud and republishes it on `/<ns>/gt/lidar/points` with only
+one field changed:
+
+```python
+old: header.frame_id = 'rover_0/base_link/lidar'
+new: header.frame_id = 'rover_0/gt_lidar_link'
+```
+
+The point coordinates in the message are **not** transformed. They are still
+in the same sensor-local coordinate system; only the frame label changes.
+`rover_0/gt_lidar_link` is identity-equivalent to `rover_0/base_link/lidar`
+(same URDF origin/orientation) but it resolves through the ground-truth TF
+tree instead:
+
+```
+map -> <ns>/gt_base_link -> ... -> <ns>/gt_lidar_link
+```
+
+`map -> <ns>/gt_base_link` comes from the Gazebo `PosePublisher`, so it tracks
+the true physics pose including roll, pitch and yaw. Because the points are
+drawn through that tree, static world points stay world-locked even when the
+belief chain rotates or translates away from truth. The same logic applies to
+the six sonar `sensor_msgs/Range` streams, whose frames are rewritten from
+`<ns>/sonar_*_link` to `<ns>/gt_sonar_*_link`.
+
+Important: the original topics (`/<ns>/lidar/points`, `/<ns>/sonar/*/range`)
+keep their belief-chain frames. slam_toolbox, Nav2 and cslam continue to
+consume those unchanged, so the autonomy stack is unaffected. The `/gt/` relay
+exists only for visualization.
+
+## v5 (2026-08-20): fix "virtual mud / clay" feel in Gazebo
+
+Problem: in some areas of the test_station world the rover barely moved even
+under teleop, as if the wheels were stuck in thick mud or soft clay. The same
+teleop command could drive freely in one spot and crawl in another.
+
+Root cause: the wheel contact parameters in `urdf/rover.urdf` had
+`<maxVel>0.1</maxVel>`. In the ODE contact solver this clamps the maximum
+contact correction / slip velocity to 0.1 m/s. Normal teleop speeds are above
+that, so the contact solver effectively capped wheel-ground slip speed to a
+crawl. The rover would spin its wheels visually but barely advance. The
+asymmetric friction (`mu1=0.8`, `mu2=0.5`) also made skid-steer rotation and
+lateral scrub artificially harsh.
+
+Fix:
+
+- `urdf/rover.urdf` wheel contacts: raise `<maxVel>` from `0.1` to `100.0`
+  m/s, set `<mu1>` and `<mu2>` symmetric to `0.9`, keep `kp=1e6`,
+  `kd=100` and `minDepth=0.001` so the micro-bump jitter fix is preserved.
+- `models/test_zone/model.sdf`: the building mesh collision had no explicit
+  surface properties. Added `<surface>` with `<mu>1.0</mu><mu2>1.0</mu2>` and
+  matching `kp/kd/minDepth/maxVel`, so the building floor behaves like the
+  explicit ground plane instead of relying on Gazebo defaults that can differ
+  by region.
+
+Files changed:
+
+| File | Change |
+|---|---|
+| `urdf/rover.urdf:393-398` | Wheel `<maxVel>` 0.1 -> 100.0; `<mu1>`/`<mu2>` 0.8/0.5 -> 0.9/0.9; updated comment |
+| `models/test_zone/model.sdf` | Added `<surface>` block to the mesh collision with friction/contact params |
+
+v5 test-run evidence (2026-08-20, `simulation.launch.py teleop:=false`, 1 rover):
+
+Sequence of timed `/<ns>/cmd_vel_teleop` commands, pose read from
+`/model/rover_0/pose` (true Gazebo pose):
+
+1. **At rest:** pose (3.300, 0.400, 0.061), yaw -180.0°.
+2. **Rotation-in-place +1.0 rad/s, 10 s:** ended yaw -32.8° — true rotation
+   147.2°. Chassis scrubbed ~4.3 cm sideways, as expected for skid steering.
+3. **Forward 0.4 m/s, 5 s:** moved from (3.324, 0.366) to (3.876, 0.034),
+   distance 0.645 m. Speed was steady and linear; no sudden drag patches.
+4. **Rotation-in-place -1.0 rad/s, 10 s:** ended yaw 170.9° — true rotation
+   201.6°. Comparable to the +1.0 run; no sign of the wheel sticking in either
+   direction.
+5. **Forward 0.4 m/s, 5 s:** moved from (3.901, 0.020) to (3.378, 0.455),
+   distance 0.674 m. Consistent with the first forward run.
+6. **Longer forward 0.4 m/s, 10 s:** moved from (3.356, 0.472) to
+   (2.461, 1.196), distance 1.15 m. The rover crossed open floor and kept
+   moving without the previous "clay" feel where the same command would slow
+   to a crawl.
+7. **No jitter regression:** z stayed at 0.061 m throughout; no chassis
+   chatter or bounce on the ground-plane micro-bumps.
+8. **RViz sanity:** `/rover_0/gt/lidar/points` `frame_id` is
+   `rover_0/gt_lidar_link`; point cloud stayed world-locked during rotation;
+   zero rviz2 error lines in the launch log; clean teardown.
