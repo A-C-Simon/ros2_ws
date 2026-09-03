@@ -15,6 +15,13 @@ pkill -f "sonar_to_range\.py" || true
 pkill -f "sensor_frame_aliases\.py" || true
 pkill -f "battery_publisher\.py" || true
 pkill -f "cmd_vel_arbiter\.py" || true
+# Long-running fleet nodes — NOT spawned in a terminal and served directly by
+# the launch process, so on a hard kill/window close the watchdog's pkill set
+# must catch them explicitly (they were omitted before, so they survived every
+# session teardown and accumulated across runs, eating CPU and breaking the
+# DDS domain with duplicate publishers).
+pkill -f "ground_truth_tf\.py" || true
+pkill -f "gt_sensor_relay\.py" || true
 pkill -f "tf_relay\.py" || true
 pkill -f "topic_tools/relay" || true
 pkill -f "install/cslam/lib/cslam" || true
