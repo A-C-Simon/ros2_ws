@@ -19,6 +19,16 @@ Launch args:
   num_rovers:=N            override fleet.num_rovers from swarm.yaml
   world:=<path>            absolute path to a .sdf world (default: test_station.sdf)
   full_sensors_all:=bool   override fleet.full_sensors_all from swarm.yaml
+  minimal_sensors:=bool    true = every rover keeps ONLY the SLAM essentials
+                           (lidar scan + points, IMU, joint states, odometry)
+                           and drops the GPU-heavy camera + all 6 sonars.
+                           cslam (lidar/points + odom), slam_toolbox and Nav2
+                           (lidar scan + odom) all keep working. Overrides the
+                           scout/lite split for lidar (every rover keeps it).
+                           Use on weak machines to reclaim real-time factor.
+                           Default false = current scout/lite behavior.
+  rviz:=bool               true (default) = open RViz2; false = headless (no GUI)
+                           — reclaims a core on CPU-only/no-GPU machines
   teleop:=bool             false = skip ONLY the Fleet Teleop terminal. Autonomy
                            still reaches the rover: teleop writes to
                            /<ns>/cmd_vel_teleop and goes silent at rest, and a
@@ -173,14 +183,17 @@ def generate_rviz_config(template_path, rovers_modes):
         for d in group['Displays']:
             cls = d.get('Class', '')
             if cls == 'rviz_default_plugins/PointCloud2':
-                if mode != 'scout':
-                    continue      # lite rovers have no lidar
+                if mode == 'lite':
+                    continue      # lite rovers have no lidar (scout + minimal keep it)
                 d['Color'] = color
+            elif cls == 'rviz_default_plugins/Image':
+                if mode == 'minimal':
+                    continue      # minimal rovers have no camera
             elif cls == 'rviz_default_plugins/Odometry':
                 d['Shape']['Color'] = color
             elif cls == 'rviz_default_plugins/Range' and mode != 'scout':
-                if d.get('Name') != 'Sonar Front':
-                    continue      # lite rovers only keep the front sonar
+                if mode == 'minimal' or d.get('Name') != 'Sonar Front':
+                    continue      # minimal rovers have no sonars; lite keeps front only
             sub_displays.append(d)
         group['Displays'] = sub_displays
         groups.append(group)
@@ -205,10 +218,26 @@ def generate_rviz_config(template_path, rovers_modes):
         yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
     return out_path
 
-# Regex that snips the heavy-sensor blocks out of the URDF for follower rovers.
-# See urdf/rover.urdf for the __LITE_STRIP_START__ / __LITE_STRIP_END__ markers.
+# Regexes that snip sensor blocks out of the URDF for reduced-sensor rovers.
+# See urdf/rover.urdf for the markers (all load-bearing, do not rename):
+#   __LITE_STRIP_START/END__       sonars 2-6 (front_right, front_left, rear,
+#                                  rear_right, rear_left) — dropped for lite AND
+#                                  minimal rovers.
+#   __NOLIDAR_STRIP_START/END__    lidar block — dropped for lite rovers only
+#                                  (minimal keeps lidar: the SLAM essential).
+#   __MINIMAL_STRIP_START/END__    camera block + front-sonar block — dropped
+#                                  for minimal rovers only.
+# The regions are disjoint, so the substitutions apply in any order.
 LITE_STRIP_RE = re.compile(
     r'<!-- __LITE_STRIP_START__.*?__LITE_STRIP_END__ -->',
+    re.DOTALL,
+)
+NOLIDAR_STRIP_RE = re.compile(
+    r'<!-- __NOLIDAR_STRIP_START__.*?__NOLIDAR_STRIP_END__ -->',
+    re.DOTALL,
+)
+MINIMAL_STRIP_RE = re.compile(
+    r'<!-- __MINIMAL_STRIP_START__.*?__MINIMAL_STRIP_END__ -->',
     re.DOTALL,
 )
 
@@ -221,12 +250,23 @@ def spawn_rover(namespace, pose, urdf_template, mode='scout', ground_truth=True)
     mode='lite'  removes lidar and 5 of the 6 sonars — leaving IMU + camera +
     front sonar. The URDF markers get stripped and the ROS-side
     bridge/publisher list shrinks to match, so no orphan topics.
+    mode='minimal' keeps the SLAM essentials only (lidar scan + points, IMU,
+    joint states, odometry) and removes the camera + all 6 sonars — the
+    GPU-heavy renders. cslam, slam_toolbox and Nav2 keep working off lidar.
     ground_truth=True skips bridging the DiffDrive's encoder /<ns>/odom —
     ground_truth_tf.py publishes that topic from the true pose instead.
     """
     ns_urdf = urdf_template.replace('__NS__', namespace)
-    if mode == 'lite':
+    if mode in ('lite', 'minimal'):
+        # Sonars 2-6 go on both reduced modes (kept only for full scouts).
         ns_urdf = LITE_STRIP_RE.sub('', ns_urdf)
+    if mode == 'lite':
+        # Lite additionally loses lidar (IMU + camera + front sonar remain).
+        ns_urdf = NOLIDAR_STRIP_RE.sub('', ns_urdf)
+    if mode == 'minimal':
+        # Minimal loses camera + front sonar instead (lidar is the kept
+        # SLAM essential, so the NOLIDAR strip must NOT apply here).
+        ns_urdf = MINIMAL_STRIP_RE.sub('', ns_urdf)
     x, y, z, yaw = pose
 
     nodes = []
@@ -291,8 +331,10 @@ def spawn_rover(namespace, pose, urdf_template, mode='scout', ground_truth=True)
     ))
 
     # Bridge every namespaced topic. `[` = Ignition→ROS, `]` = ROS→Ignition, `@` = bidir.
-    # For lite rovers, drop the topics whose sensors were stripped from the URDF —
-    # otherwise the bridge would sit waiting on messages that never arrive.
+    # For lite/minimal rovers, drop the topics whose sensors were stripped from
+    # the URDF — otherwise the bridge would sit waiting on messages that never
+    # arrive.
+    minimal = (mode == 'minimal')
     bridge_args = [
         # /<ns>/cmd_vel_arb is the arbiter's output — the ONLY writer the bridge
         # forwards into the DiffDrive. Teleop and autonomy feed /<ns>/cmd_vel_teleop
@@ -303,10 +345,14 @@ def spawn_rover(namespace, pose, urdf_template, mode='scout', ground_truth=True)
         f'/model/{namespace}/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
         f'/{namespace}/joint_states@sensor_msgs/msg/JointState[ignition.msgs.Model',
         f'/{namespace}/imu@sensor_msgs/msg/Imu[ignition.msgs.IMU',
-        f'/{namespace}/sonar/front@sensor_msgs/msg/LaserScan[ignition.msgs.LaserScan',
-        # Camera kept for every rover (moved out of the lite-strip block in the URDF).
-        f'/{namespace}/camera/image@sensor_msgs/msg/Image[ignition.msgs.Image',
     ]
+    if not minimal:
+        # Camera + front sonar are kept for scout AND lite (moved out of the
+        # lite-strip block in the URDF); minimal drops them (GPU render load).
+        bridge_args += [
+            f'/{namespace}/sonar/front@sensor_msgs/msg/LaserScan[ignition.msgs.LaserScan',
+            f'/{namespace}/camera/image@sensor_msgs/msg/Image[ignition.msgs.Image',
+        ]
     if not ground_truth:
         # Encoder mode only: bridge the DiffDrive's odometry. In GT mode this
         # is deliberately NOT bridged — ground_truth_tf.py --publish-odom
@@ -315,10 +361,13 @@ def spawn_rover(namespace, pose, urdf_template, mode='scout', ground_truth=True)
         # to /<ns>/encoder_tf inside gz (see the URDF __DIFF_TF_TOPIC__ token).
         bridge_args.append(
             f'/{namespace}/odom@nav_msgs/msg/Odometry[ignition.msgs.Odometry')
-    if mode == 'scout':
+    if mode in ('scout', 'minimal'):
         bridge_args += [
             f'/{namespace}/lidar@sensor_msgs/msg/LaserScan[ignition.msgs.LaserScan',
             f'/{namespace}/lidar/points@sensor_msgs/msg/PointCloud2[ignition.msgs.PointCloudPacked',
+        ]
+    if mode == 'scout':
+        bridge_args += [
             f'/{namespace}/sonar/front_right@sensor_msgs/msg/LaserScan[ignition.msgs.LaserScan',
             f'/{namespace}/sonar/front_left@sensor_msgs/msg/LaserScan[ignition.msgs.LaserScan',
             f'/{namespace}/sonar/rear@sensor_msgs/msg/LaserScan[ignition.msgs.LaserScan',
@@ -344,19 +393,20 @@ def spawn_rover(namespace, pose, urdf_template, mode='scout', ground_truth=True)
         output='screen',
     ))
 
-    # Sonar LaserScan → Range converter.
-    nodes.append(Node(
-        package='rover_description',
-        executable='sonar_to_range.py',
-        namespace=namespace,
-        name='sonar_to_range',
-        parameters=[{'namespace': namespace, 'use_sim_time': True}],
-        output='screen',
-    ))
+    # Sonar LaserScan → Range converter. Skipped for minimal rovers (no sonars).
+    if mode != 'minimal':
+        nodes.append(Node(
+            package='rover_description',
+            executable='sonar_to_range.py',
+            namespace=namespace,
+            name='sonar_to_range',
+            parameters=[{'namespace': namespace, 'use_sim_time': True}],
+            output='screen',
+        ))
 
-    # Livox CustomMsg publisher — only for scouts. Lite rovers have no lidar,
-    # so there's no PointCloud2 to convert.
-    if mode == 'scout':
+    # Livox CustomMsg publisher — for every rover carrying a lidar (scout +
+    # minimal). Lite rovers have no lidar, so there's no PointCloud2 to convert.
+    if mode in ('scout', 'minimal'):
         nodes.append(Node(
             package='rover_description',
             executable='livox_publisher.py',
@@ -417,6 +467,12 @@ def _launch_setup(context, *args, **kwargs):
     else:
         full_all = bool(fleet['full_sensors_all'])
 
+    # minimal_sensors:=true drops the camera + all sonars on EVERY rover but
+    # keeps lidar + IMU (the cslam/slam/Nav2 essentials), overriding the
+    # scout/lite split for lidar.
+    minimal_arg = LaunchConfiguration('minimal_sensors').perform(context).lower()
+    minimal = minimal_arg in ('1', 'true', 'yes')
+
     prefix = str(fleet['namespace_prefix'])
     first = int(fleet['first_index'])
     rover_ns_list = [f'{prefix}{first + i}' for i in range(num_rovers)]
@@ -441,7 +497,9 @@ def _launch_setup(context, *args, **kwargs):
     for i, (ns, pose) in enumerate(zip(rover_ns_list, poses)):
         # Scout: full sensor set. Lite: IMU + camera + front sonar only —
         # saves ~80% of the render/sensor load on weak machines.
-        mode = 'scout' if (full_all or i == 0) else 'lite'
+        # Minimal (minimal_sensors:=true): lidar + IMU only, camera + all
+        # sonars dropped on every rover — the SLAM-essentials rig.
+        mode = 'minimal' if minimal else ('scout' if (full_all or i == 0) else 'lite')
         print(f'[simulation.launch.py] {ns}: {mode.upper()} @ '
               f'(x={pose[0]}, y={pose[1]}, z={pose[2]}, yaw={pose[3]})')
         actions.extend(spawn_rover(ns, pose, urdf_template, mode=mode,
@@ -450,17 +508,25 @@ def _launch_setup(context, *args, **kwargs):
 
     # RViz config generated for exactly this fleet — one display group per
     # rover, colors from RVIZ_PALETTE, lidar/sonar displays matching mode.
-    rviz_template = os.path.join(pkg, 'rviz', 'rover.rviz')
-    rviz_generated = generate_rviz_config(rviz_template, list(zip(rover_ns_list, modes)))
-    print(f'[simulation.launch.py] generated RViz config for {num_rovers} '
-          f'rover(s): {rviz_generated}')
-    actions.append(Node(
-        package='rviz2',
-        executable='rviz2',
-        namespace=rover_ns_list[0],
-        arguments=['-d', rviz_generated],
-        parameters=[{'use_sim_time': True}],
-    ))
+    # Skipped entirely on machines where RViz2 (a GPU-hungry GUI) is the wrong
+    # cost: on 4-core/no-GPU boxes rviz2 alone can eat ~50% of a core and drag
+    # the sim's real-time factor down (see rviz:=false).
+    rviz_arg = LaunchConfiguration('rviz').perform(context).lower()
+    with_rviz = rviz_arg not in ('0', 'false', 'no')
+    if with_rviz:
+        rviz_template = os.path.join(pkg, 'rviz', 'rover.rviz')
+        rviz_generated = generate_rviz_config(rviz_template, list(zip(rover_ns_list, modes)))
+        print(f'[simulation.launch.py] generated RViz config for {num_rovers} '
+              f'rover(s): {rviz_generated}')
+        actions.append(Node(
+            package='rviz2',
+            executable='rviz2',
+            namespace=rover_ns_list[0],
+            arguments=['-d', rviz_generated],
+            parameters=[{'use_sim_time': True}],
+        ))
+    else:
+        print('[simulation.launch.py] RViz disabled (rviz:=false)')
 
     # ONE teleop terminal for the whole fleet — digit keys 1..N switch active rover,
     # 'b' broadcasts identical twist to all (formation drive). Professional pattern:
@@ -626,6 +692,13 @@ def generate_launch_description():
                                           '(heavy but comparable). false = only the first '
                                           'rover is scout, rest are lite (IMU + front sonar). '
                                           'Empty = use fleet.full_sensors_all from swarm.yaml.'),
+        DeclareLaunchArgument('minimal_sensors', default_value='false',
+                              description='true = every rover keeps ONLY lidar + IMU '
+                                          '(scan + points, joint states, odometry) and drops '
+                                          'the GPU-heavy camera + all 6 sonars. cslam, '
+                                          'slam_toolbox and Nav2 keep working. Overrides the '
+                                          'scout/lite split (every rover keeps lidar). Use '
+                                          'on weak machines to reclaim real-time factor.'),
         DeclareLaunchArgument('teleop', default_value='true',
                               description='false = skip the Fleet Teleop terminal. '
                                           'Autonomy still drives the rover via the '
@@ -638,6 +711,11 @@ def generate_launch_description():
                                           'Nav2 waypoint following and cslam all run on the '
                                           'true pose. false = realistic encoder odometry with '
                                           'skid-steer wheel slip (SLAM benchmarking).'),
+        DeclareLaunchArgument('rviz', default_value='true',
+                              description='true (default) = open the generated RViz config. '
+                                          'false = run headless (no rviz2 window). Use rviz:=false '
+                                          'on CPU-only / no-GPU machines to reclaim ~50% of a core '
+                                          'and keep the sim at real speed.'),
         set_resource_path,
         gz_sim,
         global_bridge,
