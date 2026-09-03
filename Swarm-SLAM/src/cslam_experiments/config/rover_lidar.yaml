@@ -1,0 +1,75 @@
+# Swarm-SLAM configuration for the AiRover simulation (rover_description package).
+#
+# Mirrors kitti_lidar.yaml's lidar pipeline but tuned for the rover's Livox-style
+# gpu_lidar (360 deg horizontal x 16 rings @ 5 Hz, ~5760 points/scan) and its
+# diff-drive odometry. The rover publishes:
+#
+#   /rover_i/lidar/points  sensor_msgs/PointCloud2   (5 Hz)
+#   /rover_i/odom          nav_msgs/Odometry         (~30 Hz)
+#
+# Topic wiring is done in cslam_rover_lidar.launch.py via per-node remappings
+# (pointcloud -> /rover_i/lidar/points, odom -> /rover_i/odom); the topic names
+# below stay relative so the same file works for any robot_id.
+#
+# use_sim_time is ON: the rover sim drives everything off Gazebo's /clock, and
+# every rover node already runs on sim time (see rover_description TOPIC_PARITY.md).
+# cslam must do the same or its TF/timers drift from the sensor messages.
+#
+# QoS note: the rover's ros_gz_bridge publishes RELIABLE by default (depth 10),
+# which matches cslam's lidar_handler_node.py RELIABLE pointcloud subscriber. Do
+# NOT apply the rover's config/sensor_qos.yaml (BEST_EFFORT) to the bridge while
+# cslam subscribes RELIABLE, or lidar/points will silently never connect.
+
+/**:
+  ros__parameters:
+    use_sim_time: true
+
+    frontend:
+      odom_topic: "odom"
+      sensor_type: "lidar"
+      pointcloud_topic: "pointcloud"
+      # Indoor-scale world (test_station.sdf is a building, not a city), so a
+      # finer voxel than KITTI's 0.5 keeps keyframe clouds dense enough for ICP.
+      voxel_size: 0.3
+      # 5760 points/scan is a mid-size cloud; 60 inliers is more forgiving than
+      # KITTI's 100 while still rejecting garbage registrations.
+      registration_min_inliers: 60
+      inter_robot_loop_closure_budget: 1
+      inter_robot_detection_period_sec: 1
+      max_queue_size: 10
+      # ScanContext cosine similarity. 0.8 (vs KITTI's 0.9) finds more candidates
+      # in a small, repeatable indoor environment.
+      similarity_threshold: 0.8
+      global_descriptors_topic: "global_descriptors"
+      intra_loop_min_inbetween_keyframes: 20
+      detection_publication_period_sec: 1.0
+      detection_publication_max_elems_per_msg: 100
+      enable_intra_robot_loop_closures: true
+      keyframe_generation_ratio_distance: 0.5
+      pointcloud_odom_approx_time_sync_s: 0.1
+      use_vertex_cover_selection: true
+      map_manager_process_period_ms: 100
+      global_descriptor_technique: "scancontext"
+
+    neighbor_management:
+      enable_neighbor_monitoring: true
+      max_heartbeat_delay_sec: 5.0
+      init_delay_sec: 5.0
+      heartbeat_period_sec: 1.0
+
+    backend:
+      pose_graph_optimization_start_period_ms: 10000
+      pose_graph_optimization_loop_period_ms: 100
+      max_waiting_time_sec: 3600
+      enable_broadcast_tf_frames: false
+
+    evaluation:
+      enable_logs: false
+      log_folder: "results"
+      enable_gps_recording: false
+      gps_topic: "gps/fix"
+      enable_sparsification_comparison: false
+
+    visualization:
+      enable: true
+      publishing_period_ms: 1000

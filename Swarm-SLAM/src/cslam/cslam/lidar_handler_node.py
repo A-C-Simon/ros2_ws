@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+import numpy as np
+from message_filters import ApproximateTimeSynchronizer, Subscriber
+from sensor_msgs.msg import PointCloud2, PointField, NavSatFix
+from nav_msgs.msg import Odometry
+from cslam_common_interfaces.msg import KeyframeOdom, KeyframePointCloud
+from cslam_common_interfaces.msg import LocalDescriptorsRequest, LocalPointCloudDescriptors, InterRobotLoopClosure, IntraRobotLoopClosure, LocalKeyframeMatch
+from cslam_common_interfaces.msg import VizPointCloud
+import cslam.lidar_pr.icp_utils as icp_utils
+import rclpy
+from rclpy.node import Node
+from rclpy.clock import Clock
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from diagnostic_msgs.msg import KeyValue
+
+class LidarHandler: 
+    """Front-End data handler for lidar data
+    """
+    def __init__(self, node, params):
+        self.node = node
+        self.params = params
+
+        # RELIABLE, not BEST_EFFORT. A KITTI velodyne cloud is ~2 MB, which the
+        # default UDP transport fragments into ~64 kB datagrams; with the stock
+        # net.core.rmem_max of 208 kB those fragments overrun the socket buffer
+        # and, under BEST_EFFORT, a single lost fragment silently discards the
+        # whole message. Measured on KITTI seq 02 at rate 0.8: this node saw 156
+        # of ~1235 published clouds (13%) while sitting at ~15% CPU with an empty
+        # work queue - starved, not overloaded. The other subscribers on the same
+        # topic (icp_odometry, periodic_static_tf) were already RELIABLE and lost
+        # nothing, which is why only this node was affected. Switching to
+        # RELIABLE lets DDS retransmit the dropped fragments: intake goes to the
+        # full 7.7 msg/s and the odom->keyframe conversion rate goes from ~34% to
+        # ~99.7%. Raising net.core.rmem_max system-wide is the complementary fix,
+        # but it is not something this package can do for the user.
+        qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=100
+        )
+        
+        tss = ApproximateTimeSynchronizer( [ Subscriber(self.node, PointCloud2, self.params["frontend.pointcloud_topic"], qos_profile=qos_profile),
+                                  Subscriber(self.node, Odometry, self.params["frontend.odom_topic"])], 100, self.params["frontend.pointcloud_odom_approx_time_sync_s"] )
+        tss.registerCallback(self.lidar_callback)
+
+        self.keyframe_odom_publisher = self.node.create_publisher(KeyframeOdom, "cslam/keyframe_odom", 100)
+
+        self.keyframe_pointcloud_publisher = self.node.create_publisher(KeyframePointCloud, "cslam/keyframe_data", 100)
+
+        self.send_local_descriptors_subscriber = self.node.create_subscription(LocalDescriptorsRequest,
+                                                                            "cslam/local_descriptors_request", self.send_local_descriptors_request, 100)
+
+        self.local_keyframe_match_subscriber = self.node.create_subscription(LocalKeyframeMatch,
+                                                                            "cslam/local_keyframe_match", self.receive_local_keyframe_match, 100)
+        
+        self.pointcloud_descriptors_publisher = self.node.create_publisher(LocalPointCloudDescriptors, "/cslam/local_descriptors", 100)
+        
+        self.pointcloud_descriptors_subscriber = self.node.create_subscription(LocalPointCloudDescriptors, "/cslam/local_descriptors", self.receive_local_descriptors, 100)
+        
+        self.intra_robot_loop_closure_publisher = self.node.create_publisher(IntraRobotLoopClosure, "cslam/intra_robot_loop_closure", 100)
+
+        self.inter_robot_loop_closure_publisher = self.node.create_publisher(InterRobotLoopClosure, "/cslam/inter_robot_loop_closure", 100)
+
+        self.viz_pointcloud_publisher = self.node.create_publisher(VizPointCloud, "/cslam/viz/keyframe_pointcloud", 100)
+
+        period_ms = self.params["frontend.map_manager_process_period_ms"]
+        self.processing_timer = self.node.create_timer(float(period_ms)/1000, self.process_new_sensor_data, clock=Clock())
+
+        self.received_data = []
+        self.local_descriptors_map = {}
+        self.nb_local_keyframes = 0
+        self.previous_keyframe = None
+        self.previous_odom = None
+
+        if self.params["evaluation.enable_logs"]:
+            self.log_publisher = self.node.create_publisher(
+                KeyValue, 'log_info', 100)
+            self.log_local_descriptors_cumulative_communication = 0
+
+        if self.params["evaluation.enable_gps_recording"]:
+            self.gps_subscriber = self.node.create_subscription(NavSatFix, self.params["evaluation.gps_topic"], self.gps_callback, 100)
+            self.gps_data = []
+            self.latest_gps = NavSatFix()
+
+    def lidar_callback(self, pc_msg, odom_msg):
+        """Sensor data callback
+
+        Args:
+            pc_msg (sensor_msgs/Pointcloud2): point cloud
+            odom_msg (nav_msgs/Odometry): odometry estimate
+        """
+        if (odom_msg.pose.covariance[0] > 1000):
+            self.node.get_logger().warn("Odom tracking failed, skipping frame")
+            return
+        self.received_data.append((pc_msg, odom_msg))
+        if self.params["evaluation.enable_gps_recording"]:
+            self.gps_data.append(self.latest_gps)
+
+    def gps_callback(self, gps_msg):
+        """GPS data callback
+        """
+        self.latest_gps = gps_msg
+
+    def send_local_descriptors_request(self, request):
+        """Callback for local descriptors request
+        """
+        out_msg = LocalPointCloudDescriptors()
+        out_msg.data = icp_utils.points_to_ros(self.local_descriptors_map[request.keyframe_id])
+        out_msg.keyframe_id = request.keyframe_id
+        out_msg.robot_id = self.params["robot_id"]
+        out_msg.matches_robot_id = request.matches_robot_id
+        out_msg.matches_keyframe_id = request.matches_keyframe_id
+
+        self.pointcloud_descriptors_publisher.publish(out_msg)
+        if self.params["evaluation.enable_logs"]:
+            self.log_local_descriptors_cumulative_communication += len(out_msg.data.data)
+            self.log_publisher.publish(KeyValue(key="local_descriptors_cumulative_communication", value=str(self.log_local_descriptors_cumulative_communication)))
+    
+    def receive_local_descriptors(self, msg):
+        """Callback for local descriptors from other robots
+        """
+        frame_ids = []
+        for i in range(len(msg.matches_robot_id)):
+            if msg.matches_robot_id[i] == self.params["robot_id"]:
+                frame_ids.append(msg.matches_keyframe_id[i])
+        for frame_id in frame_ids:
+            pc = icp_utils.points_to_open3d(self.local_descriptors_map[frame_id])
+            transform, success = icp_utils.compute_transform(pc, icp_utils.ros_to_open3d(msg.data), self.params["frontend.voxel_size"], self.params["frontend.registration_min_inliers"])
+            out_msg = InterRobotLoopClosure()
+            out_msg.robot0_id = self.params["robot_id"]
+            out_msg.robot0_keyframe_id = frame_id
+            out_msg.robot1_id = msg.robot_id
+            out_msg.robot1_keyframe_id = msg.keyframe_id
+            if success:
+                out_msg.success = True
+                out_msg.transform = transform
+            else:
+                out_msg.success = False
+            self.inter_robot_loop_closure_publisher.publish(out_msg)
+
+    def receive_local_keyframe_match(self, msg):
+        """Callback for local keyframe match for intra-robot loop closures
+        """
+        pc0 = icp_utils.points_to_open3d(self.local_descriptors_map[msg.keyframe0_id])
+        pc1 = icp_utils.points_to_open3d(self.local_descriptors_map[msg.keyframe1_id])
+        transform, success = icp_utils.compute_transform(pc0, pc1, self.params["frontend.voxel_size"], self.params["frontend.registration_min_inliers"])
+        out_msg = IntraRobotLoopClosure()
+        out_msg.keyframe0_id = msg.keyframe0_id
+        out_msg.keyframe1_id = msg.keyframe1_id
+        if success:
+            out_msg.success = True
+            out_msg.transform = transform
+        else:
+            out_msg.success = False
+        self.intra_robot_loop_closure_publisher.publish(out_msg)
+
+    def odom_distance_squared(self, odom0, odom1):
+        """Compute the squared distance between two odometry messages
+        """
+        return (odom0.pose.pose.position.x - odom1.pose.pose.position.x)**2 + (odom0.pose.pose.position.y - odom1.pose.pose.position.y)**2 + (odom0.pose.pose.position.z - odom1.pose.pose.position.z)**2
+
+    def generate_new_keyframe(self, msg):
+        """Check if we should generate a new keyframe
+
+        Args:
+            msg (nav_msgs/Odometry): odometry msg
+
+        Returns:
+            bool: flag indicating if a new keyframe should be created.
+        """
+        if self.previous_odom is None:
+            self.previous_odom = msg[1]
+            return True 
+        dist = self.odom_distance_squared(self.previous_odom, msg[1])
+        if dist > self.params["frontend.keyframe_generation_ratio_distance"]**2:
+            self.previous_odom = msg[1]
+            return True
+        else:
+            return False
+
+    def process_new_sensor_data(self):
+        """ Process new sensor data
+        """
+        if len(self.received_data) > 0:
+            data = self.received_data[0]
+            self.received_data.pop(0)
+            gps_data = None
+            if self.params["evaluation.enable_gps_recording"]:
+                gps = self.gps_data[0]
+                self.gps_data.pop(0)
+            if self.generate_new_keyframe(data):
+                try:
+                    # Retained as a compact float32 array, not an Open3D cloud:
+                    # this dict holds one entry per keyframe for the whole run
+                    # (loop closures were measured reaching 880-1265 keyframes
+                    # back, so old entries genuinely cannot be evicted), and an
+                    # Open3D cloud costs ~2x in point data plus object
+                    # overhead, and gets a normals array attached in place the
+                    # first time a loop closure is attempted against it.
+                    self.local_descriptors_map[self.nb_local_keyframes] = icp_utils.downsample_ros_pointcloud_to_array(data[0], self.params["frontend.voxel_size"])
+                except Exception as e:
+                    self.local_descriptors_map[self.nb_local_keyframes] = np.zeros((0, 3), dtype=np.float32)
+                    self.node.get_logger().info("Failure to downsample point cloud to voxel size {}. {}".format(self.params["frontend.voxel_size"], e))
+                    return
+                # Publish pointcloud
+                msg_pointcloud = KeyframePointCloud()
+                msg_pointcloud.id = self.nb_local_keyframes
+                msg_pointcloud.pointcloud = icp_utils.points_to_ros(self.local_descriptors_map[self.nb_local_keyframes])
+                self.keyframe_pointcloud_publisher.publish(msg_pointcloud)
+                # Publish odom
+                msg_odom = KeyframeOdom()
+                msg_odom.id = self.nb_local_keyframes
+                msg_odom.odom = data[1]
+                if self.params["evaluation.enable_gps_recording"]:
+                    msg_odom.gps = gps
+                self.keyframe_odom_publisher.publish(msg_odom)
+                if self.params["visualization.enable"]:
+                    viz_msg = VizPointCloud()
+                    viz_msg.robot_id = self.params["robot_id"]
+                    viz_msg.keyframe_id = self.nb_local_keyframes
+                    viz_msg.pointcloud = msg_pointcloud.pointcloud
+                    self.viz_pointcloud_publisher.publish(viz_msg)
+                self.nb_local_keyframes = self.nb_local_keyframes + 1
+
+if __name__ == '__main__':
+
+    rclpy.init(args=None)
+    node = Node("map_manager")
+    node.declare_parameters(
+            namespace='',
+            parameters=[('frontend.pointcloud_topic', 'pointcloud'),
+                        ('frontend.odom_topic', 'odom'),
+                        ('frontend.map_manager_process_period_ms', 100),
+                        ('frontend.voxel_size', 0.5),
+                        ('frontend.registration_min_inliers', 60),
+                        ('frontend.keyframe_generation_ratio_distance', 0.5),
+                        ('frontend.pointcloud_odom_approx_time_sync_s', 0.1),
+                        ('robot_id', 0),           
+                        ('evaluation.enable_logs', False),  
+                        ('evaluation.enable_gps_recording', False), 
+                        ('evaluation.gps_topic', ""),            
+                        ('evaluation.gps_topic', ""),        
+                        ('visualization.enable', False),
+                        ])
+    params = {}
+    params['frontend.pointcloud_topic'] = node.get_parameter(
+        'frontend.pointcloud_topic').value 
+    params['frontend.odom_topic'] = node.get_parameter(
+        'frontend.odom_topic').value
+    params['frontend.map_manager_process_period_ms'] = node.get_parameter(
+        'frontend.map_manager_process_period_ms').value
+    params['frontend.voxel_size'] = node.get_parameter(
+        'frontend.voxel_size').value
+    params['frontend.registration_min_inliers'] = node.get_parameter(
+        'frontend.registration_min_inliers').value 
+    params['frontend.keyframe_generation_ratio_distance'] = node.get_parameter(
+        'frontend.keyframe_generation_ratio_distance').value
+    params['frontend.pointcloud_odom_approx_time_sync_s'] = node.get_parameter(
+        'frontend.pointcloud_odom_approx_time_sync_s').value
+    params['robot_id'] = node.get_parameter(
+        'robot_id').value
+    params["evaluation.enable_logs"] = node.get_parameter(
+            'evaluation.enable_logs').value
+    params["evaluation.enable_gps_recording"] = node.get_parameter(
+            'evaluation.enable_gps_recording').value
+    params["evaluation.gps_topic"] = node.get_parameter(
+            'evaluation.gps_topic').value
+    params["visualization.enable"] = node.get_parameter(
+            'visualization.enable').value
+    lidar_handler = LidarHandler(node, params)
+    node.get_logger().info('Initialization done.')
+    rclpy.spin(node)
+    rclpy.shutdown()
