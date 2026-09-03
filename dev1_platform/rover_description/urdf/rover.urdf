@@ -390,17 +390,18 @@
   <gazebo reference="base_link">
     <visual><material><ambient>0.75 0.75 0.78 1</ambient><diffuse>0.75 0.75 0.78 1</diffuse><specular>0.2 0.2 0.2 1</specular></material></visual>
   </gazebo>
-  <!-- Per-wheel friction + contact softness. Symmetric mu1/mu2 for skid-steer so
-       lateral scrub during rotation isn't artificially stiffer than rolling;
-       kp/kd soften ground contact so the light chassis doesn't chatter on micro-bumps.
-       maxVel was 0.1 m/s and caused a "virtual mud" effect: the contact solver clamped
-       wheel-ground slip speed to 0.1 m/s, so teleop commands above that felt stuck.
-       Raised to 100 m/s to keep the jitter limit in name only while letting the rover
-       actually drive; minDepth still prevents micro-bump chatter. -->
-  <gazebo reference="wheel_fr_link"><mu1>0.9</mu1><mu2>0.9</mu2><kp>1000000.0</kp><kd>100.0</kd><minDepth>0.001</minDepth><maxVel>100.0</maxVel><visual><material><ambient>0.15 0.15 0.15 1</ambient><diffuse>0.15 0.15 0.15 1</diffuse></material></visual></gazebo>
-  <gazebo reference="wheel_fl_link"><mu1>0.9</mu1><mu2>0.9</mu2><kp>1000000.0</kp><kd>100.0</kd><minDepth>0.001</minDepth><maxVel>100.0</maxVel><visual><material><ambient>0.15 0.15 0.15 1</ambient><diffuse>0.15 0.15 0.15 1</diffuse></material></visual></gazebo>
-  <gazebo reference="wheel_br_link"><mu1>0.9</mu1><mu2>0.9</mu2><kp>1000000.0</kp><kd>100.0</kd><minDepth>0.001</minDepth><maxVel>100.0</maxVel><visual><material><ambient>0.15 0.15 0.15 1</ambient><diffuse>0.15 0.15 0.15 1</diffuse></material></visual></gazebo>
-  <gazebo reference="wheel_bl_link"><mu1>0.9</mu1><mu2>0.9</mu2><kp>1000000.0</kp><kd>100.0</kd><minDepth>0.001</minDepth><maxVel>100.0</maxVel><visual><material><ambient>0.15 0.15 0.15 1</ambient><diffuse>0.15 0.15 0.15 1</diffuse></material></visual></gazebo>
+  <!-- Per-wheel friction (DART). DART reads mu1->mu and mu2->mu2 from the ode
+       friction block, but IGNORES the ODE contact tags (kp/kd/minDepth/maxVel) —
+       those are no-ops under the Fortress dartsim engine and were the basis of
+       the ineffective "v5 maxVel" fix (commit 310978c); they are not set here.
+       Symmetric mu1/mu2 = 0.9 is retained: for a skid-steer the lateral friction
+       provides the reaction that actually rotates the chassis, so lowering mu2
+       was found to REDUCE turning (wheels slipped in place) in DART and is left
+       equal to mu. -->
+  <gazebo reference="wheel_fr_link"><mu1>0.9</mu1><mu2>0.9</mu2><visual><material><ambient>0.15 0.15 0.15 1</ambient><diffuse>0.15 0.15 0.15 1</diffuse></material></visual></gazebo>
+  <gazebo reference="wheel_fl_link"><mu1>0.9</mu1><mu2>0.9</mu2><visual><material><ambient>0.15 0.15 0.15 1</ambient><diffuse>0.15 0.15 0.15 1</diffuse></material></visual></gazebo>
+  <gazebo reference="wheel_br_link"><mu1>0.9</mu1><mu2>0.9</mu2><visual><material><ambient>0.15 0.15 0.15 1</ambient><diffuse>0.15 0.15 0.15 1</diffuse></material></visual></gazebo>
+  <gazebo reference="wheel_bl_link"><mu1>0.9</mu1><mu2>0.9</mu2><visual><material><ambient>0.15 0.15 0.15 1</ambient><diffuse>0.15 0.15 0.15 1</diffuse></material></visual></gazebo>
   <gazebo reference="lidar_link"><visual><material><ambient>0.1 0.4 0.9 1</ambient><diffuse>0.1 0.4 0.9 1</diffuse></material></visual></gazebo>
   <gazebo reference="camera_link"><visual><material><ambient>0.25 0.25 0.28 1</ambient><diffuse>0.25 0.25 0.28 1</diffuse></material></visual></gazebo>
   <gazebo reference="sonar_front_link"><visual><material><ambient>0.1 0.85 0.25 1</ambient><diffuse>0.1 0.85 0.25 1</diffuse></material></visual></gazebo>
@@ -415,10 +416,10 @@
        Bridged to ROS2 via ros_gz_bridge (see launch file)
   ═══════════════════════════════════════════════════ -->
 
-  <!-- __LITE_STRIP_START__
-       Everything between this marker and the matching __LITE_STRIP_END__ marker is
+  <!-- __NOLIDAR_STRIP_START__
+       Everything between this marker and the matching __NOLIDAR_STRIP_END__ marker is
        removed by the launch file for "lite" rovers. Scouts keep the full sensor set;
-       followers keep only IMU + front sonar so the sim scales to N=10.
+       followers keep only IMU + camera + front sonar so the sim scales to N=10.
        Do NOT edit these markers — they are load-bearing for launch/simulation.launch.py. -->
 
   <!-- LiDAR (Livox Mid-360 — simulated as gpu_lidar)
@@ -438,13 +439,18 @@
       <visualize>true</visualize>
     </sensor>
   </gazebo>
-  <!-- __LITE_STRIP_END__ -->
+  <!-- __NOLIDAR_STRIP_END__ -->
 
   <!-- RGB Camera (LeTMC-520). Kept for EVERY rover (scout + lite) so multi-rover
        demos still show camera feeds on all robots. Resolution 320×240 @ 10 Hz —
        downgraded from 640×480 @ 15 Hz because 3 rovers × the higher settings
        pushed real-time factor below 1.0 and made physics stepping jerky.
        Bump these back up per-project if you have a beefier machine. -->
+  <!-- minimal_sensors:=true strips everything between the __MINIMAL_STRIP markers
+       (camera block here, front-sonar block below): cslam + slam_toolbox + Nav2
+       need only lidar + IMU, so the camera/sonar render load is dropped.
+       Do NOT edit these markers — they are load-bearing for launch/simulation.launch.py. -->
+  <!-- __MINIMAL_STRIP_START__ -->
   <gazebo reference="camera_link">
     <sensor name="camera" type="camera">
       <topic>__NS__/camera/image</topic>
@@ -462,6 +468,7 @@
          Fortress ThermalCameraSensor is unstable when configured near other
          cameras. Re-add here if downstream ever needs a thermal channel. -->
   </gazebo>
+  <!-- __MINIMAL_STRIP_END__ -->
 
   <!-- IMU on base_link. Noise blocks removed — added CPU load caused jerky physics
        stepping when combined with sonar + lidar noise. Dev 2 / Dev 3 can re-add
@@ -482,6 +489,7 @@
        bridged to ROS as sensor_msgs/msg/LaserScan.
        Beam = 25° cone (5 samples × 5°) to mimic real HC-SR04 spread.
   ═══════════════════════════════════════════════════ -->
+  <!-- __MINIMAL_STRIP_START__ -->
   <gazebo reference="sonar_front_link">
     <sensor name="sonar_front" type="gpu_lidar">
       <topic>__NS__/sonar/front</topic>
@@ -497,6 +505,7 @@
       <visualize>true</visualize>
     </sensor>
   </gazebo>
+  <!-- __MINIMAL_STRIP_END__ -->
 
   <!-- __LITE_STRIP_START__
        Sonars 2 through 6 (front_right, front_left, rear, rear_right, rear_left)
