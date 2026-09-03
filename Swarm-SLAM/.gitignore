@@ -1,5 +1,11 @@
-src/
 build/
 log/
 install/
 results/
+
+# Local customized packages are tracked; third-party vendored deps are not.
+# cslam, cslam_experiments and cslam_visualization are customized in this repo
+# and must be committed. TEASER-plusplus and cslam_interfaces are untouched
+# upstream deps fetched via cslam.repos and stay out of the tree.
+src/TEASER-plusplus/
+src/cslam_interfaces/
