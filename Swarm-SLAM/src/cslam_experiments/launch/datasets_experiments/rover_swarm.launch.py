@@ -23,6 +23,11 @@ velocity smoother writes /rover_i/cmd_vel — the cmd_vel_arbiter autonomy input
 and tf_relay mirrors the sim's global TF into each /rover_i/tf. Disable with
 nav2:=false.
 
+Sensors: minimal_sensors:=true drops the GPU-heavy camera + all 6 sonars on
+every rover and keeps the SLAM essentials only (lidar scan + points, IMU,
+odometry) — cslam, slam_toolbox and Nav2 keep working. Use on weak machines
+to reclaim real-time factor.
+
 Example:
     ros2 launch cslam_experiments rover_swarm.launch.py max_nb_robots:=3
 
@@ -87,6 +92,8 @@ def launch_setup(context, *args, **kwargs):
             'num_rovers': str(max_nb_robots),
             'world': LaunchConfiguration('world'),
             'full_sensors_all': LaunchConfiguration('full_sensors_all'),
+            'minimal_sensors': LaunchConfiguration('minimal_sensors'),
+            'rviz': LaunchConfiguration('rviz'),
             'ground_truth': LaunchConfiguration('ground_truth'),
         }.items(),
     )
@@ -216,6 +223,13 @@ def generate_launch_description():
                         'their cslam robot gets no pointcloud). For SLAM testing '
                         'leave this true/empty. Empty = use rover swarm.yaml.'),
         DeclareLaunchArgument(
+            'minimal_sensors', default_value='false',
+            description='true = every rover keeps ONLY lidar + IMU (scan + '
+                        'points, joint states, odometry) and drops the '
+                        'GPU-heavy camera + all 6 sonars. cslam, slam_toolbox '
+                        'and Nav2 keep working. Use on weak machines to '
+                        'reclaim real-time factor.'),
+        DeclareLaunchArgument(
             'enable_simulated_rendezvous', default_value='false',
             description='Simulate limited inter-robot communication windows.'),
         DeclareLaunchArgument(
@@ -243,5 +257,11 @@ def generate_launch_description():
                         '(map + Nav2 + cslam run on the true pose). false = '
                         'realistic encoder odometry with wheel slip — use this '
                         'for SLAM benchmarking.'),
+        DeclareLaunchArgument(
+            'rviz', default_value='true',
+            description='true (default) = open the generated RViz config. '
+                        'false = run headless (no rviz2 window) — reclaims ~50% '
+                        'of a core on CPU-only/no-GPU machines and keeps the sim '
+                        'at real speed.'),
         OpaqueFunction(function=launch_setup),
     ])
