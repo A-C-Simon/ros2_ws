@@ -12,7 +12,11 @@
 <sdf version="1.8">
   <world name="rover_world">
 
-    <physics name="1ms" type="ignored">
+    <!-- Explicit DART physics profile. "ignored" was not a valid engine type
+         (valid: ode|bullet|simbody|dart), so gz-sim fell back to defaults and no
+         tuned profile was applied. type="dart" pins the dartsim engine; the
+         solver/collision_detector stay at DART's battle-tested defaults. -->
+    <physics name="dart" type="dart" default="true">
       <max_step_size>0.002</max_step_size>
       <real_time_factor>1.0</real_time_factor>
     </physics>
